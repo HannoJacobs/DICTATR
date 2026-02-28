@@ -6,6 +6,7 @@ struct OnboardingView: View {
     @State private var microphoneGranted = false
     @State private var accessibilityGranted = false
     @State private var currentStep = 0
+    @State private var accessibilityTimer: Timer?
 
     var body: some View {
         VStack(spacing: 24) {
@@ -62,6 +63,10 @@ struct OnboardingView: View {
         .frame(width: 420, height: 480)
         .onAppear {
             checkPermissions()
+        }
+        .onDisappear {
+            accessibilityTimer?.invalidate()
+            accessibilityTimer = nil
         }
     }
 
@@ -123,7 +128,8 @@ struct OnboardingView: View {
     private func requestAccessibilityAccess() {
         PasteManager.requestAccessibilityPermission()
         // Poll for accessibility grant since there's no callback
-        Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { timer in
+        accessibilityTimer?.invalidate()
+        accessibilityTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { timer in
             if PasteManager.checkAccessibilityPermission() {
                 accessibilityGranted = true
                 timer.invalidate()

@@ -81,12 +81,14 @@ final class AppState {
 
     func loadModel() async {
         do {
-            statusMessage = "Loading model..."
+            await MainActor.run { statusMessage = "Loading model..." }
             try await transcriptionEngine.loadModel()
-            statusMessage = "Ready"
+            await MainActor.run { statusMessage = "Ready" }
         } catch {
-            statusMessage = "Model load failed"
-            errorMessage = error.localizedDescription
+            await MainActor.run {
+                statusMessage = "Model load failed"
+                errorMessage = error.localizedDescription
+            }
         }
     }
 
@@ -155,6 +157,8 @@ final class AppState {
                 currentState = .idle
 
             } catch {
+                // Clean up temp audio file on failure
+                try? FileManager.default.removeItem(at: result.url)
                 errorMessage = "Transcription failed: \(error.localizedDescription)"
                 statusMessage = "Error"
                 currentState = .idle
