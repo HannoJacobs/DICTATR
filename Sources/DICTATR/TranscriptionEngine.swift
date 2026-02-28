@@ -2,6 +2,7 @@ import Foundation
 import WhisperKit
 
 @Observable
+@MainActor
 final class TranscriptionEngine {
     private(set) var isModelLoaded = false
     private(set) var isLoading = false
@@ -12,20 +13,24 @@ final class TranscriptionEngine {
     func loadModel(name: String = "large-v3-turbo") async throws {
         guard !isLoading else { return }
 
-        await MainActor.run {
-            isLoading = true
-            loadingProgress = "Downloading model..."
-        }
+        isLoading = true
+        loadingProgress = "Downloading model..."
 
-        let pipe = try await WhisperKit(
-            WhisperKitConfig(model: name, verbose: false, logLevel: .error)
-        )
+        do {
+            let pipe = try await WhisperKit(
+                WhisperKitConfig(model: name, verbose: false, logLevel: .error)
+            )
 
-        await MainActor.run {
             self.whisperKit = pipe
             self.isModelLoaded = true
             self.isLoading = false
             self.loadingProgress = ""
+        } catch {
+            // Reset isLoading on failure so the user can retry.
+            // Without this, the guard above permanently blocks all future attempts.
+            self.isLoading = false
+            self.loadingProgress = ""
+            throw error
         }
     }
 

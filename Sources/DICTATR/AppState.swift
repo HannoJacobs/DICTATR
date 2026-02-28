@@ -9,28 +9,29 @@ enum DictationState: Equatable {
 }
 
 @Observable
+@MainActor
 final class AppState {
     var currentState: DictationState = .idle
     var lastTranscription: String?
     var statusMessage: String = "Ready"
     var errorMessage: String?
 
-    var autoPasteEnabled: Bool {
-        get { UserDefaults.standard.bool(forKey: "autoPasteEnabled") }
-        set { UserDefaults.standard.set(newValue, forKey: "autoPasteEnabled") }
+    // Stored properties with didSet so @Observable tracks changes correctly.
+    // Computed properties are NOT instrumented by @Observable, so using them
+    // would cause SwiftUI views to never re-render on value changes.
+    var autoPasteEnabled: Bool = UserDefaults.standard.bool(forKey: "autoPasteEnabled") {
+        didSet { UserDefaults.standard.set(autoPasteEnabled, forKey: "autoPasteEnabled") }
     }
 
-    var retentionCount: Int {
-        get {
-            let count = UserDefaults.standard.integer(forKey: "retentionCount")
-            return count > 0 ? count : 100
-        }
-        set { UserDefaults.standard.set(newValue, forKey: "retentionCount") }
+    var retentionCount: Int = {
+        let count = UserDefaults.standard.integer(forKey: "retentionCount")
+        return count > 0 ? count : 100
+    }() {
+        didSet { UserDefaults.standard.set(max(1, retentionCount), forKey: "retentionCount") }
     }
 
-    var hasCompletedOnboarding: Bool {
-        get { UserDefaults.standard.bool(forKey: "hasCompletedOnboarding") }
-        set { UserDefaults.standard.set(newValue, forKey: "hasCompletedOnboarding") }
+    var hasCompletedOnboarding: Bool = UserDefaults.standard.bool(forKey: "hasCompletedOnboarding") {
+        didSet { UserDefaults.standard.set(hasCompletedOnboarding, forKey: "hasCompletedOnboarding") }
     }
 
     let audioRecorder = AudioRecorder()
@@ -39,6 +40,7 @@ final class AppState {
 
     private var hotkeyManager: HotkeyManager?
     private var currentAudioURL: URL?
+    private var modelLoadTask: Task<Void, Never>?
 
     var menuBarIcon: String {
         switch currentState {
@@ -55,40 +57,39 @@ final class AppState {
     var isModelLoading: Bool { transcriptionEngine.isLoading }
 
     init() {
-        // Initialize database, fail gracefully
+        // Register defaults (idempotent, never overwrites explicit user choices)
+        UserDefaults.standard.register(defaults: ["autoPasteEnabled": true])
+
+        // Initialize database, fail gracefully but notify user
         do {
             self.databaseManager = try DatabaseManager()
         } catch {
             print("Failed to initialize database: \(error)")
             self.databaseManager = nil
+            self.errorMessage = "History unavailable: database failed to load."
         }
 
-        // Set default for auto-paste if not set
-        if !UserDefaults.standard.contains(key: "autoPasteEnabled") {
-            UserDefaults.standard.set(true, forKey: "autoPasteEnabled")
-        }
-
-        // Register hotkey
+        // Register hotkey — dispatch to MainActor since callback thread is unspecified
         hotkeyManager = HotkeyManager { [weak self] in
-            self?.toggleRecording()
+            Task { @MainActor in
+                self?.toggleRecording()
+            }
         }
 
-        // Load model in background
-        Task {
-            await loadModel()
+        // Load model in background (store task for cancellation)
+        modelLoadTask = Task { [weak self] in
+            await self?.loadModel()
         }
     }
 
     func loadModel() async {
         do {
-            await MainActor.run { statusMessage = "Loading model..." }
+            statusMessage = "Loading model..."
             try await transcriptionEngine.loadModel()
-            await MainActor.run { statusMessage = "Ready" }
+            statusMessage = "Ready"
         } catch {
-            await MainActor.run {
-                statusMessage = "Model load failed"
-                errorMessage = error.localizedDescription
-            }
+            statusMessage = "Model load failed"
+            errorMessage = "\(error)"
         }
     }
 
@@ -121,18 +122,24 @@ final class AppState {
     }
 
     private func stopRecordingAndTranscribe() {
-        guard let result = audioRecorder.stopRecording() else { return }
+        guard let result = audioRecorder.stopRecording() else {
+            // Reset to idle if stop fails — prevents state stuck at .recording
+            currentState = .idle
+            statusMessage = "Recording failed"
+            return
+        }
 
         currentState = .transcribing
         statusMessage = "Transcribing..."
 
-        Task { @MainActor in
+        Task {
             do {
                 let text = try await transcriptionEngine.transcribe(audioURL: result.url)
 
                 if text.isEmpty {
                     statusMessage = "No speech detected"
                     currentState = .idle
+                    try? FileManager.default.removeItem(at: result.url)
                     return
                 }
 
@@ -141,17 +148,24 @@ final class AppState {
                 // Paste to active app
                 await PasteManager.paste(text: text, autoPaste: autoPasteEnabled)
 
-                // Save to database
+                // Save to database — don't let DB failure undo the transcription
                 if let db = databaseManager {
-                    var record = DictationRecord(
-                        text: text,
-                        duration: result.duration,
-                        audioFilePath: result.url.path,
-                        createdAt: Date()
-                    )
-                    try db.save(&record)
-                    try db.deleteOld(keepLast: retentionCount)
+                    do {
+                        var record = DictationRecord(
+                            text: text,
+                            duration: result.duration,
+                            audioFilePath: nil,
+                            createdAt: Date()
+                        )
+                        try db.save(&record)
+                        try db.deleteOld(keepLast: retentionCount)
+                    } catch {
+                        errorMessage = "Failed to save to history: \(error.localizedDescription)"
+                    }
                 }
+
+                // Clean up temp audio file after transcription
+                try? FileManager.default.removeItem(at: result.url)
 
                 statusMessage = "Done"
                 currentState = .idle
