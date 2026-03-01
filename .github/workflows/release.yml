@@ -1,0 +1,30 @@
+name: Build and Release DMG
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build-and-release:
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Release
+        run: |
+          xcodebuild \
+            -scheme DICTATR \
+            -configuration Release \
+            -destination 'platform=macOS' \
+            build
+
+      - name: Create DMG
+        run: bash create-dmg.sh
+
+      - name: Upload DMG to latest release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          LATEST_TAG=$(gh release list --limit 1 --json tagName -q '.[0].tagName')
+          gh release upload "$LATEST_TAG" DICTATR.dmg --clobber
