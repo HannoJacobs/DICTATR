@@ -73,6 +73,41 @@ re-grant both permissions:
 
 ---
 
+## Publishing a new release (GitHub Releases + Pages)
+
+The website at `https://hannojacobs.github.io/DICTATR/` always serves the **latest** release
+DMG. The download button URL is stable — it never needs updating:
+```
+https://github.com/HannoJacobs/DICTATR/releases/latest/download/DICTATR.dmg
+```
+
+**To ship a new version:**
+
+```bash
+# 1. Build Release in Xcode (Cmd+B with Release config)
+
+# 2. Package the DMG
+bash create-dmg.sh
+
+# 3. Create a GitHub release and upload the DMG
+gh release create v1.1 DICTATR.dmg \
+  --title "DICTATR v1.1" \
+  --notes "What changed in this version."
+```
+
+That's it. The website download button automatically serves the new file. No other changes needed.
+
+**First-time GitHub Pages setup** (one-off, already done):
+1. Go to repo Settings → Pages
+2. Source: Deploy from a branch
+3. Branch: `main` / folder: `/docs`
+4. Save — site goes live at `https://hannojacobs.github.io/DICTATR/`
+
+**To update the landing page**, edit `docs/index.html`, commit, and push. GitHub Pages
+redeploys automatically within ~30 seconds.
+
+---
+
 ## Required Permissions
 
 | Permission | Why |
