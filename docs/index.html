@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DICTATR — On-Device Dictation for macOS</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #0d0d0d;
+      color: #f0f0f0;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 2rem;
+    }
+
+    .container {
+      max-width: 580px;
+      width: 100%;
+      text-align: center;
+    }
+
+    .badge {
+      display: inline-block;
+      background: #1a1a1a;
+      border: 1px solid #2a2a2a;
+      border-radius: 999px;
+      padding: 0.3rem 0.9rem;
+      font-size: 0.78rem;
+      color: #888;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      margin-bottom: 1.8rem;
+    }
+
+    h1 {
+      font-size: clamp(2.8rem, 8vw, 4.5rem);
+      font-weight: 700;
+      letter-spacing: -0.03em;
+      line-height: 1;
+      margin-bottom: 1.2rem;
+    }
+
+    .tagline {
+      font-size: 1.15rem;
+      color: #999;
+      line-height: 1.6;
+      margin-bottom: 2.5rem;
+    }
+
+    .download-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.6rem;
+      background: #f0f0f0;
+      color: #0d0d0d;
+      text-decoration: none;
+      font-size: 1rem;
+      font-weight: 600;
+      padding: 0.85rem 1.8rem;
+      border-radius: 12px;
+      transition: background 0.15s, transform 0.1s;
+      margin-bottom: 0.75rem;
+    }
+
+    .download-btn:hover { background: #fff; transform: translateY(-1px); }
+    .download-btn:active { transform: translateY(0); }
+
+    .download-btn svg {
+      width: 18px;
+      height: 18px;
+      flex-shrink: 0;
+    }
+
+    .sub {
+      font-size: 0.8rem;
+      color: #555;
+      margin-bottom: 3.5rem;
+    }
+
+    .features {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1rem;
+      text-align: left;
+      margin-bottom: 3rem;
+    }
+
+    .feature {
+      background: #141414;
+      border: 1px solid #1f1f1f;
+      border-radius: 12px;
+      padding: 1.1rem 1.2rem;
+    }
+
+    .feature-icon {
+      font-size: 1.3rem;
+      margin-bottom: 0.5rem;
+    }
+
+    .feature h3 {
+      font-size: 0.9rem;
+      font-weight: 600;
+      margin-bottom: 0.25rem;
+      color: #e8e8e8;
+    }
+
+    .feature p {
+      font-size: 0.8rem;
+      color: #666;
+      line-height: 1.5;
+    }
+
+    .install-steps {
+      background: #141414;
+      border: 1px solid #1f1f1f;
+      border-radius: 12px;
+      padding: 1.4rem 1.6rem;
+      text-align: left;
+      margin-bottom: 2.5rem;
+    }
+
+    .install-steps h2 {
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: #555;
+      letter-spacing: 0.07em;
+      text-transform: uppercase;
+      margin-bottom: 1rem;
+    }
+
+    .install-steps ol {
+      list-style: none;
+      counter-reset: steps;
+    }
+
+    .install-steps li {
+      counter-increment: steps;
+      display: flex;
+      align-items: flex-start;
+      gap: 0.75rem;
+      font-size: 0.875rem;
+      color: #bbb;
+      line-height: 1.5;
+      padding: 0.4rem 0;
+    }
+
+    .install-steps li::before {
+      content: counter(steps);
+      background: #222;
+      border: 1px solid #2a2a2a;
+      border-radius: 999px;
+      width: 1.4rem;
+      height: 1.4rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.7rem;
+      font-weight: 600;
+      color: #666;
+      flex-shrink: 0;
+      margin-top: 0.05rem;
+    }
+
+    .footer {
+      font-size: 0.78rem;
+      color: #444;
+    }
+
+    .footer a {
+      color: #666;
+      text-decoration: none;
+    }
+
+    .footer a:hover { color: #999; }
+
+    @media (max-width: 480px) {
+      .features { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+
+    <div class="badge">macOS 14+ &nbsp;·&nbsp; Apple Silicon</div>
+
+    <h1>DICTATR</h1>
+
+    <p class="tagline">
+      Press a key. Speak. Done.<br>
+      100% on-device dictation — no cloud, no subscription, no account.
+    </p>
+
+    <a class="download-btn" href="https://github.com/HannoJacobs/DICTATR/releases/latest/download/DICTATR.dmg">
+      <svg viewBox="0 0 20 20" fill="currentColor">
+        <path d="M10 2a1 1 0 011 1v9.586l2.293-2.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L9 12.586V3a1 1 0 011-1z"/>
+        <path d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1z"/>
+      </svg>
+      Download for Mac
+    </a>
+
+    <p class="sub">Free &amp; open source &nbsp;·&nbsp; v1.0 &nbsp;·&nbsp; ~5 MB</p>
+
+    <div class="features">
+      <div class="feature">
+        <div class="feature-icon">🎙</div>
+        <h3>Instant dictation</h3>
+        <p>Press F5 anywhere, speak, transcription is pasted directly into the active app.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">🔒</div>
+        <h3>Fully private</h3>
+        <p>Runs entirely on your Mac using Apple's Neural Engine. Nothing leaves your device.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">⚡</div>
+        <h3>Fast &amp; accurate</h3>
+        <p>Powered by WhisperKit and the large-v3-turbo model. Near-instant for short clips.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">📋</div>
+        <h3>History</h3>
+        <p>Every dictation is saved locally. Search, copy, and manage from the menu bar.</p>
+      </div>
+    </div>
+
+    <div class="install-steps">
+      <h2>Getting started</h2>
+      <ol>
+        <li>Open the DMG and drag DICTATR to Applications</li>
+        <li>Right-click the app → Open (first launch only, bypasses Gatekeeper)</li>
+        <li>Grant Microphone access when prompted</li>
+        <li>Grant Accessibility in System Settings → Privacy &amp; Security → Accessibility</li>
+        <li>Press F5 anywhere and start talking</li>
+      </ol>
+    </div>
+
+    <p class="footer">
+      <a href="https://github.com/HannoJacobs/DICTATR">View source on GitHub</a>
+      &nbsp;·&nbsp;
+      Built with WhisperKit
+    </p>
+
+  </div>
+</body>
+</html>
