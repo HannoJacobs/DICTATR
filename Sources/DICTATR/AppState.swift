@@ -173,6 +173,7 @@ final class AppState {
     }
 
     private func stopRecordingAndTranscribe() {
+        NSSound(named: .init("Pop"))?.play()
         guard let result = audioRecorder.stopRecording() else {
             // Reset to idle if stop fails — prevents state stuck at .recording
             recordingIndicator.hide()
@@ -244,6 +245,7 @@ final class AppState {
                 try? FileManager.default.removeItem(at: result.url)
 
                 self.recordingIndicator.showDone()
+                NSSound(named: .init("Glass"))?.play()
                 self.errorMessage = nil
                 self.statusMessage = "Done"
                 self.currentState = .idle
