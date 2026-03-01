@@ -17,17 +17,7 @@ final class AudioRecorder {
     // Thread-safe flag readable from the real-time audio thread.
     // @Observable's isRecording is not safe to read from the audio thread.
     // OSAllocatedUnfairLock provides proper atomicity for cross-thread access.
-    private nonisolated(unsafe) let _isCapturing = OSAllocatedUnfairLock(initialState: false)
-
-    deinit {
-        _isCapturing.withLock { $0 = false }
-        durationTimer?.invalidate()
-        audioEngine?.inputNode.removeTap(onBus: 0)
-        audioEngine?.stop()
-        if let url = outputURL {
-            try? FileManager.default.removeItem(at: url)
-        }
-    }
+    private let _isCapturing = OSAllocatedUnfairLock(initialState: false)
 
     func startRecording() throws -> URL {
         // Guard against double-start — clean up any existing session first

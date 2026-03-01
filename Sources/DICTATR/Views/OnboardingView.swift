@@ -13,7 +13,7 @@ struct OnboardingView: View {
             // Header
             Image(systemName: "mic.fill")
                 .font(.system(size: 48))
-                .foregroundStyle(.accent)
+                .foregroundStyle(Color.accentColor)
 
             Text("Welcome to DICTATR")
                 .font(.title)
@@ -81,7 +81,7 @@ struct OnboardingView: View {
         HStack(spacing: 12) {
             Image(systemName: granted ? "checkmark.circle.fill" : icon)
                 .font(.title2)
-                .foregroundStyle(granted ? .green : .accent)
+                .foregroundStyle(granted ? .green : Color.accentColor)
                 .frame(width: 30)
 
             VStack(alignment: .leading, spacing: 2) {

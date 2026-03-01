@@ -2,6 +2,7 @@ import SwiftUI
 
 struct MenuBarView: View {
     @Environment(AppState.self) private var appState
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -120,6 +121,14 @@ struct MenuBarView: View {
             }
             .buttonStyle(.borderless)
             .foregroundStyle(PasteManager.checkAccessibilityPermission() ? .green : .orange)
+
+            Button {
+                openWindow(id: "history")
+            } label: {
+                Label("History...", systemImage: "clock")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.borderless)
 
             Divider()
 

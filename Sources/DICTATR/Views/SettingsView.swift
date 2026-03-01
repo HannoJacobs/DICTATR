@@ -66,7 +66,7 @@ struct AboutSettingsView: View {
         VStack(spacing: 16) {
             Image(systemName: "mic.fill")
                 .font(.system(size: 48))
-                .foregroundStyle(.accent)
+                .foregroundStyle(Color.accentColor)
 
             Text("DICTATR")
                 .font(.title)

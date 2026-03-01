@@ -10,7 +10,7 @@ final class TranscriptionEngine {
 
     private var whisperKit: WhisperKit?
 
-    func loadModel(name: String = "large-v3-turbo") async throws {
+    func loadModel() async throws {
         guard !isLoading else { return }
 
         isLoading = true
@@ -18,7 +18,7 @@ final class TranscriptionEngine {
 
         do {
             let pipe = try await WhisperKit(
-                WhisperKitConfig(model: name, verbose: false, logLevel: .error)
+                WhisperKitConfig(verbose: true, logLevel: .debug, load: true)
             )
 
             // Don't commit results if the task was cancelled during the await

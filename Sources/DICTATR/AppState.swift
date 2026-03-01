@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import KeyboardShortcuts
 import SwiftUI
 
 enum DictationState: Equatable {
@@ -25,7 +26,7 @@ final class AppState {
 
     var retentionCount: Int = {
         let count = UserDefaults.standard.integer(forKey: "retentionCount")
-        return count > 0 ? count : 100
+        return count > 0 ? count : 10
     }() {
         didSet {
             retentionCount = max(1, retentionCount)
@@ -44,6 +45,7 @@ final class AppState {
     private var hotkeyManager: HotkeyManager?
     private var modelLoadTask: Task<Void, Never>?
     private var transcriptionTask: Task<Void, Never>?
+    private let recordingIndicator = RecordingIndicatorPanel()
 
     var menuBarIcon: String {
         switch currentState {
@@ -62,6 +64,12 @@ final class AppState {
     init() {
         // Register defaults (idempotent, never overwrites explicit user choices)
         UserDefaults.standard.register(defaults: ["autoPasteEnabled": true])
+
+        // One-time migration: reset shortcut to new F5 default
+        if !UserDefaults.standard.bool(forKey: "shortcutMigratedToF5") {
+            KeyboardShortcuts.reset(.toggleDictation)
+            UserDefaults.standard.set(true, forKey: "shortcutMigratedToF5")
+        }
 
         // Initialize database, fail gracefully but notify user
         do {
@@ -85,10 +93,6 @@ final class AppState {
         }
     }
 
-    deinit {
-        modelLoadTask?.cancel()
-        transcriptionTask?.cancel()
-    }
 
     func loadModel() async {
         do {
@@ -128,15 +132,19 @@ final class AppState {
 
         do {
             _ = try audioRecorder.startRecording()
+            NSSound(named: .init("Tink"))?.play()
             currentState = .recording
             statusMessage = "Recording..."
             errorMessage = nil
+            recordingIndicator.show(audioRecorder: audioRecorder)
         } catch {
             errorMessage = "Failed to start recording: \(error.localizedDescription)"
         }
     }
 
     private func stopRecordingAndTranscribe() {
+        recordingIndicator.hide()
+
         guard let result = audioRecorder.stopRecording() else {
             // Reset to idle if stop fails — prevents state stuck at .recording
             currentState = .idle
