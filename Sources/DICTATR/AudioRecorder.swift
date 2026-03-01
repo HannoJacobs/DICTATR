@@ -1,5 +1,6 @@
 import AVFoundation
 import Foundation
+import os
 
 @Observable
 @MainActor
@@ -10,17 +11,30 @@ final class AudioRecorder {
     private var audioEngine: AVAudioEngine?
     private var outputFile: AVAudioFile?
     private var outputURL: URL?
-    private var recordingStartTime: Date?
+    private var recordingStartTime: TimeInterval?
     private var durationTimer: Timer?
 
-    // Atomic flag readable from the real-time audio thread.
+    // Thread-safe flag readable from the real-time audio thread.
     // @Observable's isRecording is not safe to read from the audio thread.
-    private nonisolated(unsafe) var _isCapturing = false
+    // OSAllocatedUnfairLock provides proper atomicity for cross-thread access.
+    private nonisolated(unsafe) let _isCapturing = OSAllocatedUnfairLock(initialState: false)
+
+    deinit {
+        _isCapturing.withLock { $0 = false }
+        durationTimer?.invalidate()
+        audioEngine?.inputNode.removeTap(onBus: 0)
+        audioEngine?.stop()
+        if let url = outputURL {
+            try? FileManager.default.removeItem(at: url)
+        }
+    }
 
     func startRecording() throws -> URL {
         // Guard against double-start — clean up any existing session first
         if isRecording {
-            _ = stopRecording()
+            if let result = stopRecording() {
+                try? FileManager.default.removeItem(at: result.url)
+            }
         }
 
         let tempDir = FileManager.default.temporaryDirectory
@@ -54,11 +68,13 @@ final class AudioRecorder {
 
         // Store outputFile before installing tap so closure can access it via self
         self.outputFile = file
-        self._isCapturing = true
+        self._isCapturing.withLock { $0 = true }
 
-        inputNode.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { [weak self] buffer, _ in
-            // Read atomic flag instead of @Observable isRecording (audio thread safety)
-            guard let self, self._isCapturing, let outFile = self.outputFile else { return }
+        inputNode.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { [weak self, file] buffer, _ in
+            // Read atomic flag instead of @Observable isRecording (audio thread safety).
+            // Capture `file` directly to avoid accessing self.outputFile from the audio thread (data race).
+            guard let self, self._isCapturing.withLock({ $0 }) else { return }
+            let outFile = file
 
             let frameCount = AVAudioFrameCount(
                 Double(buffer.frameLength) * targetFormat.sampleRate / inputFormat.sampleRate
@@ -86,18 +102,27 @@ final class AudioRecorder {
             }
         }
 
-        try engine.start()
+        do {
+            try engine.start()
+        } catch {
+            // Clean up the tap, file, and state since engine failed to start
+            self._isCapturing.withLock { $0 = false }
+            inputNode.removeTap(onBus: 0)
+            self.outputFile = nil
+            try? FileManager.default.removeItem(at: fileURL)
+            throw error
+        }
 
         self.audioEngine = engine
         self.outputURL = fileURL
         self.isRecording = true
         self.recordingDuration = 0
-        self.recordingStartTime = Date()
+        self.recordingStartTime = ProcessInfo.processInfo.systemUptime
 
         durationTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self, let start = self.recordingStartTime else { return }
-                self.recordingDuration = Date().timeIntervalSince(start)
+                self.recordingDuration = ProcessInfo.processInfo.systemUptime - start
             }
         }
 
@@ -109,13 +134,19 @@ final class AudioRecorder {
 
         // Signal the tap callback to stop writing BEFORE tearing down the engine.
         // This prevents the tap from writing with invalid buffers after engine stop.
-        _isCapturing = false
+        _isCapturing.withLock { $0 = false }
         isRecording = false
 
         durationTimer?.invalidate()
         durationTimer = nil
 
-        let duration = recordingDuration
+        // Compute final duration from monotonic clock for accuracy (timer is up to 100ms stale)
+        let duration: TimeInterval
+        if let start = recordingStartTime {
+            duration = ProcessInfo.processInfo.systemUptime - start
+        } else {
+            duration = recordingDuration
+        }
 
         audioEngine?.inputNode.removeTap(onBus: 0)
         audioEngine?.stop()

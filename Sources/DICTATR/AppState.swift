@@ -27,7 +27,10 @@ final class AppState {
         let count = UserDefaults.standard.integer(forKey: "retentionCount")
         return count > 0 ? count : 100
     }() {
-        didSet { UserDefaults.standard.set(max(1, retentionCount), forKey: "retentionCount") }
+        didSet {
+            retentionCount = max(1, retentionCount)
+            UserDefaults.standard.set(retentionCount, forKey: "retentionCount")
+        }
     }
 
     var hasCompletedOnboarding: Bool = UserDefaults.standard.bool(forKey: "hasCompletedOnboarding") {
@@ -39,8 +42,8 @@ final class AppState {
     let databaseManager: DatabaseManager?
 
     private var hotkeyManager: HotkeyManager?
-    private var currentAudioURL: URL?
     private var modelLoadTask: Task<Void, Never>?
+    private var transcriptionTask: Task<Void, Never>?
 
     var menuBarIcon: String {
         switch currentState {
@@ -82,14 +85,26 @@ final class AppState {
         }
     }
 
+    deinit {
+        modelLoadTask?.cancel()
+        transcriptionTask?.cancel()
+    }
+
     func loadModel() async {
         do {
             statusMessage = "Loading model..."
             try await transcriptionEngine.loadModel()
+            if Task.isCancelled { return }
             statusMessage = "Ready"
         } catch {
+            if Task.isCancelled { return }
             statusMessage = "Model load failed"
-            errorMessage = "\(error)"
+            let modelError = "Model load failed: \(error.localizedDescription)"
+            if let existing = errorMessage {
+                errorMessage = "\(existing)\n\(modelError)"
+            } else {
+                errorMessage = modelError
+            }
         }
     }
 
@@ -112,7 +127,7 @@ final class AppState {
         }
 
         do {
-            currentAudioURL = try audioRecorder.startRecording()
+            _ = try audioRecorder.startRecording()
             currentState = .recording
             statusMessage = "Recording..."
             errorMessage = nil
@@ -129,27 +144,48 @@ final class AppState {
             return
         }
 
+        // Skip transcription for empty or trivially short recordings
+        let fileSize = (try? FileManager.default.attributesOfItem(atPath: result.url.path)[.size] as? Int) ?? 0
+        if result.duration < 0.3 || fileSize < 1000 {
+            statusMessage = "Recording too short"
+            currentState = .idle
+            try? FileManager.default.removeItem(at: result.url)
+            return
+        }
+
         currentState = .transcribing
         statusMessage = "Transcribing..."
 
-        Task {
-            do {
-                let text = try await transcriptionEngine.transcribe(audioURL: result.url)
+        // Cancel any lingering previous transcription task
+        transcriptionTask?.cancel()
 
-                if text.isEmpty {
-                    statusMessage = "No speech detected"
-                    currentState = .idle
+        transcriptionTask = Task { [weak self] in
+            do {
+                guard let self else {
+                    try? FileManager.default.removeItem(at: result.url)
+                    return
+                }
+                let text = try await self.transcriptionEngine.transcribe(audioURL: result.url)
+
+                guard !Task.isCancelled else {
                     try? FileManager.default.removeItem(at: result.url)
                     return
                 }
 
-                lastTranscription = text
+                if text.isEmpty {
+                    self.statusMessage = "No speech detected"
+                    self.currentState = .idle
+                    try? FileManager.default.removeItem(at: result.url)
+                    return
+                }
+
+                self.lastTranscription = text
 
                 // Paste to active app
-                await PasteManager.paste(text: text, autoPaste: autoPasteEnabled)
+                await PasteManager.paste(text: text, autoPaste: self.autoPasteEnabled)
 
                 // Save to database — don't let DB failure undo the transcription
-                if let db = databaseManager {
+                if let db = self.databaseManager {
                     do {
                         var record = DictationRecord(
                             text: text,
@@ -158,24 +194,26 @@ final class AppState {
                             createdAt: Date()
                         )
                         try db.save(&record)
-                        try db.deleteOld(keepLast: retentionCount)
+                        try db.deleteOld(keepLast: self.retentionCount)
                     } catch {
-                        errorMessage = "Failed to save to history: \(error.localizedDescription)"
+                        self.errorMessage = "Failed to save to history: \(error.localizedDescription)"
                     }
                 }
 
                 // Clean up temp audio file after transcription
                 try? FileManager.default.removeItem(at: result.url)
 
-                statusMessage = "Done"
-                currentState = .idle
+                self.errorMessage = nil
+                self.statusMessage = "Done"
+                self.currentState = .idle
 
             } catch {
                 // Clean up temp audio file on failure
                 try? FileManager.default.removeItem(at: result.url)
-                errorMessage = "Transcription failed: \(error.localizedDescription)"
-                statusMessage = "Error"
-                currentState = .idle
+                guard let self else { return }
+                self.errorMessage = "Transcription failed: \(error.localizedDescription)"
+                self.statusMessage = "Error"
+                self.currentState = .idle
             }
         }
     }

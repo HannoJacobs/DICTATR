@@ -60,6 +60,9 @@ struct HistoryListView: View {
         }
         .frame(minWidth: 300, minHeight: 400)
         .onAppear { loadRecords() }
+        .onChange(of: appState.lastTranscription) {
+            loadRecords()
+        }
     }
 
     private func loadRecords() {
@@ -71,17 +74,20 @@ struct HistoryListView: View {
                 records = try db.search(query: searchText)
             }
         } catch {
-            print("Failed to load records: \(error)")
+            appState.errorMessage = "Failed to load history: \(error.localizedDescription)"
         }
     }
 
     private func deleteRecord(_ record: DictationRecord) {
         guard let db = appState.databaseManager else { return }
         do {
+            if let audioPath = record.audioFilePath {
+                try? FileManager.default.removeItem(atPath: audioPath)
+            }
             try db.delete(record)
             loadRecords()
         } catch {
-            print("Failed to delete record: \(error)")
+            appState.errorMessage = "Failed to delete record: \(error.localizedDescription)"
         }
     }
 }

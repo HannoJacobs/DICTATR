@@ -10,4 +10,8 @@ final class HotkeyManager {
             self?.onToggle()
         }
     }
+
+    deinit {
+        KeyboardShortcuts.reset(.toggleDictation)
+    }
 }
