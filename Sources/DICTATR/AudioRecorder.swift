@@ -1,3 +1,24 @@
+// AudioRecorder.swift
+//
+// Records microphone input to a 16 kHz mono WAV file — the format WhisperKit expects.
+//
+// THREADING MODEL:
+//   AVAudioEngine's tap callback fires on a real-time audio thread, NOT the main actor.
+//   All @Observable stored properties are main-actor-only. Accessing them from the audio
+//   thread is a data race. Solution: OSAllocatedUnfairLock(_isCapturing) is the only
+//   shared state read from the audio thread. Everything else is accessed via captured
+//   locals (the `file` capture in the tap closure).
+//
+// FORMAT PIPELINE:
+//   inputNode output format (device native, e.g. 48kHz stereo)
+//     → AVAudioConverter
+//     → 16kHz mono Float32 PCM  ← written to disk as WAV
+//
+// LIFECYCLE:
+//   startRecording() → installs tap, starts engine, returns URL
+//   stopRecording()  → signals tap to stop (atomic), removes tap, stops engine, returns (url, duration)
+//   The caller (AppState) owns cleanup of the WAV file after transcription.
+
 import AVFoundation
 import Foundation
 import os

@@ -1,3 +1,20 @@
+// MenuBarView.swift
+//
+// The primary popup shown when the user clicks the DICTATR menu bar icon.
+// Handles two panels — the main menu and an inline settings panel — via local @State.
+//
+// BUTTON STYLE NOTES — why onTapGesture instead of Button:
+//   .borderless buttons: tiny hit target (just the label text/icon, not the full row)
+//   .plain buttons: can dismiss the MenuBarExtra window before the action fires
+//   Solution: HStack rows + .contentShape(Rectangle()) + .onTapGesture gives a
+//   reliable full-width hit target that fires correctly inside MenuBarExtra(.window).
+//
+// SETTINGS NAVIGATION — why @State is local, not @Binding from DICTATRApp:
+//   If showingSettings lived on DICTATRApp and changed which view the MenuBarExtra shows,
+//   SwiftUI would tear down and reconstruct the view hierarchy (potentially closing the
+//   window). Keeping it local means the same MenuBarView instance swaps between panels
+//   with no window teardown. See settings-bug.md for the full history.
+
 import SwiftUI
 
 struct MenuBarView: View {
@@ -74,10 +91,24 @@ struct MenuBarView: View {
                     .font(.headline)
 
                 if appState.currentState == .recording {
-                    Text(formatDuration(appState.audioRecorder.recordingDuration))
+                    let duration = appState.audioRecorder.recordingDuration
+                    let progress = min(duration / 300.0, 1.0)
+                    let color = recordingWarningColor(progress: progress)
+                    Text("\(formatRecordingTime(duration)) / 5:00")
                         .font(.caption)
                         .monospacedDigit()
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(color)
+                    GeometryReader { geo in
+                        ZStack(alignment: .leading) {
+                            RoundedRectangle(cornerRadius: 2)
+                                .fill(.quaternary)
+                            RoundedRectangle(cornerRadius: 2)
+                                .fill(color)
+                                .frame(width: geo.size.width * progress)
+                        }
+                        .frame(height: 3)
+                    }
+                    .frame(height: 3)
                 } else {
                     Text(appState.statusMessage)
                         .font(.caption)
@@ -165,6 +196,8 @@ struct MenuBarView: View {
                 showingSettings = true
             }
 
+            // DispatchQueue.main.async ensures the tap gesture completes before the
+            // process exits — avoids any chance of terminate firing mid-event-handling.
             menuRow("Quit DICTATR", icon: "power") {
                 DispatchQueue.main.async {
                     NSApplication.shared.terminate(nil)
@@ -173,10 +206,10 @@ struct MenuBarView: View {
         }
     }
 
-    // MARK: - Menu Row (tap gesture, not Button)
+    // MARK: - Menu Row
 
-    /// Full-width tappable menu row using onTapGesture instead of Button
-    /// to avoid MenuBarExtra window dismissal issues with button styles.
+    /// Full-width tappable row. Uses onTapGesture instead of Button to avoid
+    /// MenuBarExtra window-dismissal issues inherent in SwiftUI button styles.
     private func menuRow(
         _ title: String,
         icon: String,
@@ -210,13 +243,15 @@ struct MenuBarView: View {
         }
     }
 
-    private func formatDuration(_ duration: TimeInterval) -> String {
+    private func formatRecordingTime(_ duration: TimeInterval) -> String {
         let minutes = Int(duration) / 60
         let seconds = Int(duration) % 60
-        let tenths = Int(duration * 10) % 10
-        if minutes > 0 {
-            return String(format: "%d:%02d.%d", minutes, seconds, tenths)
-        }
-        return String(format: "%d.%d s", seconds, tenths)
+        return String(format: "%d:%02d", minutes, seconds)
+    }
+
+    private func recordingWarningColor(progress: Double) -> Color {
+        if progress < 0.6 { return .green }
+        if progress < 0.8 { return .orange }
+        return .red
     }
 }

@@ -1,3 +1,34 @@
+// AppState.swift
+//
+// Central application state and pipeline orchestrator.
+// Drives the full dictation lifecycle: idle → recording → transcribing → idle
+//
+// STATE MANAGEMENT:
+//   @Observable + @MainActor: all mutations happen on the main thread.
+//   SwiftUI views re-render automatically when observed stored properties change.
+//   Computed properties are NOT tracked by @Observable — use stored properties with
+//   didSet for UserDefaults-backed values (see autoPasteEnabled, retentionCount).
+//
+// STARTUP SEQUENCE:
+//   1. init()              — register defaults, open DB, register hotkey, start model download
+//   2. startModelDownload() — TranscriptionEngine.loadModel() in a Task
+//   3. DICTATRApp shows ModelDownloadView while !isModelLoaded
+//   4. When isModelLoaded becomes true → MenuBarView shown, hotkey active
+//
+// RECORDING PIPELINE:
+//   toggleRecording() → startRecording()
+//     → AVAudioEngine tap writes 16kHz WAV to temp dir
+//     → RecordingIndicatorPanel shown (floating overlay)
+//   toggleRecording() → stopRecordingAndTranscribe()
+//     → WAV file → WhisperKit → text
+//     → PasteManager.paste() (clipboard + Cmd+V if accessibility granted)
+//     → DatabaseManager.save() + deleteOld()
+//     → temp WAV file deleted
+//
+// TEMP FILE CLEANUP:
+//   Every code path deletes the WAV file — success, failure, cancellation, too-short.
+//   If the app crashes mid-transcription, the OS clears temp dir eventually.
+
 import AppKit
 import Foundation
 import KeyboardShortcuts

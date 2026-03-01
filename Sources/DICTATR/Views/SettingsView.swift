@@ -1,3 +1,16 @@
+// ⚠️  DISTRIBUTION GOTCHA — Bundle.module crash
+// Any SPM package view that calls Bundle.module internally (e.g. KeyboardShortcuts.Recorder,
+// LaunchAtLogin.Toggle) crashes with EXC_BREAKPOINT/SIGTRAP when the app is distributed as a
+// manually-bundled .app via create-dmg.sh. Xcode copies SPM resource bundles into
+// Contents/Resources/ automatically; the shell-script bundler does NOT.
+//
+// Rule: only use APIs from these packages that do not render localised UI views:
+//   SAFE:   KeyboardShortcuts.getShortcut(for:), KeyboardShortcuts.onKeyUp(for:)
+//   UNSAFE: KeyboardShortcuts.Recorder   ← was here, caused Settings crash
+//   UNSAFE: LaunchAtLogin.Toggle         ← was here, also removed
+//
+// Full post-mortem and diagnosis instructions: see settings-bug.md
+
 import KeyboardShortcuts
 import SwiftUI
 
@@ -29,6 +42,10 @@ struct GeneralSettingsView: View {
 
         Form {
             Section("Hotkey") {
+                // Displaying the shortcut as text instead of KeyboardShortcuts.Recorder,
+                // because Recorder calls Bundle.module and crashes in the DMG-bundled app.
+                // To make this editable again, the app needs to be code-signed so Xcode can
+                // copy the KeyboardShortcuts SPM resource bundle into Contents/Resources/.
                 HStack {
                     Text("Toggle Dictation:")
                     Spacer()

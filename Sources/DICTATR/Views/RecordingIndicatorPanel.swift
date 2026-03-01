@@ -113,7 +113,7 @@ private struct RecordingIndicatorView: View {
                         .scaleEffect(isPulsing ? 1.3 : 0.8)
                         .opacity(isPulsing ? 1.0 : 0.6)
 
-                    Text(formatDuration(state.audioRecorder?.recordingDuration ?? 0))
+                    Text("\(formatDuration(state.audioRecorder?.recordingDuration ?? 0)) / 5:00")
                         .font(.system(size: 14, weight: .medium, design: .monospaced))
                         .foregroundStyle(.white)
 

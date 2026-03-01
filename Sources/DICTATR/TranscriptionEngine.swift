@@ -1,3 +1,32 @@
+// TranscriptionEngine.swift
+//
+// Wraps WhisperKit for on-device speech-to-text. Runs entirely locally — no network calls
+// during transcription. Model files are cached after first download.
+//
+// MODEL LOADING (two phases):
+//   Phase 1 — WhisperKit.download(variant:progressCallback:)
+//     Downloads model weights from HuggingFace Hub to the system cache.
+//     If already cached, completes instantly (milliseconds, no network).
+//     Uses recommendedModels().default — auto-selects the right size for this device.
+//     DO NOT hardcode a variant like "openai_whisper-large-v3_turbo"; it ignores hardware
+//     capabilities and may download a model that's too large/slow for the machine.
+//
+//   Phase 2 — WhisperKit(WhisperKitConfig(modelFolder:, load: true, download: false))
+//     Loads the cached weights into Core ML / Apple Neural Engine memory.
+//     `download: false` prevents WhisperKit from trying to re-download.
+//
+// MEMORY NOTE:
+//   The model (~500MB–1.5GB depending on variant) is loaded onto Apple's Neural Engine,
+//   which uses unified memory NOT attributed to the process in Activity Monitor. The app
+//   may show only ~95MB RSS while the full model is loaded. This is normal. Nothing is
+//   sent to the cloud — WhisperKit is 100% on-device.
+//
+// OBSERVABLE PROPERTIES (used by ModelDownloadView for progress UI):
+//   downloadProgress: 0.0–1.0 during phase 1, then 1.0 during phase 2
+//   loadingPhase: "Downloading model..." / "Loading model..." / "" (done)
+//   isLoading: true while either phase is in progress
+//   isModelLoaded: true once the pipeline is fully ready to transcribe
+
 import Foundation
 import WhisperKit
 
