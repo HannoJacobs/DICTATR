@@ -7,6 +7,12 @@ final class RecordingIndicatorPanel {
     private var state = IndicatorState()
     private var autoDismissTask: Task<Void, Never>?
 
+    // Fixed size large enough for all phases. The panel background is clear,
+    // so extra space is invisible — only the capsule background shows.
+    // This avoids the infinite Auto Layout constraint loop that happens when
+    // resizing the panel in response to @Observable state changes.
+    private static let panelSize = NSSize(width: 260, height: 50)
+
     func show(audioRecorder: AudioRecorder) {
         autoDismissTask?.cancel()
         state.phase = .recording
@@ -16,10 +22,10 @@ final class RecordingIndicatorPanel {
 
         let view = RecordingIndicatorView(state: state)
         let hostingView = NSHostingView(rootView: view)
-        hostingView.frame = NSRect(x: 0, y: 0, width: 240, height: 40)
+        hostingView.frame = NSRect(origin: .zero, size: Self.panelSize)
 
         let p = NSPanel(
-            contentRect: hostingView.frame,
+            contentRect: NSRect(origin: .zero, size: Self.panelSize),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -36,8 +42,8 @@ final class RecordingIndicatorPanel {
         // Position: top-right corner, below menu bar
         if let screen = NSScreen.main {
             let screenFrame = screen.visibleFrame
-            let x = screenFrame.maxX - hostingView.frame.width - 12
-            let y = screenFrame.maxY - hostingView.frame.height - 8
+            let x = screenFrame.maxX - Self.panelSize.width - 12
+            let y = screenFrame.maxY - Self.panelSize.height - 8
             p.setFrameOrigin(NSPoint(x: x, y: y))
         }
 
@@ -93,47 +99,51 @@ private struct RecordingIndicatorView: View {
     @State private var isPulsing = false
 
     var body: some View {
-        HStack(spacing: 8) {
-            switch state.phase {
-            case .idle:
-                EmptyView()
+        HStack {
+            Spacer()
+            HStack(spacing: 8) {
+                switch state.phase {
+                case .idle:
+                    EmptyView()
 
-            case .recording:
-                Circle()
-                    .fill(.red)
-                    .frame(width: 12, height: 12)
-                    .scaleEffect(isPulsing ? 1.3 : 0.8)
-                    .opacity(isPulsing ? 1.0 : 0.6)
+                case .recording:
+                    Circle()
+                        .fill(.red)
+                        .frame(width: 12, height: 12)
+                        .scaleEffect(isPulsing ? 1.3 : 0.8)
+                        .opacity(isPulsing ? 1.0 : 0.6)
 
-                Text(formatDuration(state.audioRecorder?.recordingDuration ?? 0))
-                    .font(.system(size: 14, weight: .medium, design: .monospaced))
-                    .foregroundStyle(.white)
+                    Text(formatDuration(state.audioRecorder?.recordingDuration ?? 0))
+                        .font(.system(size: 14, weight: .medium, design: .monospaced))
+                        .foregroundStyle(.white)
 
-            case .processing:
-                ProgressView()
-                    .controlSize(.small)
-                    .tint(.white)
+                case .processing:
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(.white)
 
-                Text("Processing...")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(.white)
+                    Text("Processing...")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.white)
 
-            case .done:
-                Image(systemName: "checkmark.circle.fill")
-                    .font(.system(size: 14))
-                    .foregroundStyle(.green)
+                case .done:
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 14))
+                        .foregroundStyle(.green)
 
-                Text("Copied to clipboard")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(.white)
+                    Text("Copied to clipboard")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.white)
+                }
             }
+            .fixedSize()
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .background(
+                Capsule()
+                    .fill(.black.opacity(0.75))
+            )
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
-        .background(
-            Capsule()
-                .fill(.black.opacity(0.75))
-        )
         .onAppear {
             withAnimation(.easeInOut(duration: 0.6).repeatForever(autoreverses: true)) {
                 isPulsing = true
