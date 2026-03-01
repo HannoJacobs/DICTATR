@@ -1,7 +1,8 @@
 # DICTATR
 
-macOS menu bar dictation app. Press a hotkey, speak, transcription is pasted into whatever
-app is active. Runs 100% on-device using WhisperKit — no cloud, no subscription.
+macOS menu bar dictation app. Press a hotkey, speak, stop — the transcription is
+**automatically copied to your clipboard and pasted** into whatever app you were using,
+all in one step. Runs 100% on-device using WhisperKit — no cloud, no subscription.
 
 ---
 
