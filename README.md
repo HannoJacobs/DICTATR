@@ -197,6 +197,17 @@ SwiftUI `Button` inside a `MenuBarExtra(.window)` scene has unreliable hit-testi
 **Fix:** use `HStack` + `.contentShape(Rectangle())` + `.onTapGesture` for full-width,
 reliable tap targets. See `MenuBarView.swift`.
 
+### "DICTATR is damaged and can't be opened" after installing from DMG
+
+macOS quarantines unsigned apps downloaded via browser. Right-click → Open does not fix
+this variant. Run this in Terminal after dragging to Applications:
+
+```bash
+xattr -cr /Applications/DICTATR.app
+```
+
+Then open normally.
+
 ### Moving the project folder breaks Xcode (no targets / no run destination)
 
 If you move the project to a new folder, Xcode's "Recent Projects" entry still points to
