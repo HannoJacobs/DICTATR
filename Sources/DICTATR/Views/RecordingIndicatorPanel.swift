@@ -16,7 +16,7 @@ final class RecordingIndicatorPanel {
 
         let view = RecordingIndicatorView(state: state)
         let hostingView = NSHostingView(rootView: view)
-        hostingView.frame = NSRect(x: 0, y: 0, width: 180, height: 40)
+        hostingView.frame = NSRect(x: 0, y: 0, width: 240, height: 40)
 
         let p = NSPanel(
             contentRect: hostingView.frame,
