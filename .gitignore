@@ -37,6 +37,7 @@ Pods/
 
 # App-specific
 *.app
+*.dmg
 
 # Build artifacts
 build/
