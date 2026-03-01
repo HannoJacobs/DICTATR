@@ -29,7 +29,12 @@ struct GeneralSettingsView: View {
 
         Form {
             Section("Hotkey") {
-                KeyboardShortcuts.Recorder("Toggle Dictation:", name: .toggleDictation)
+                HStack {
+                    Text("Toggle Dictation:")
+                    Spacer()
+                    Text(currentShortcutLabel)
+                        .foregroundStyle(.secondary)
+                }
             }
 
             Section("Transcription") {
@@ -50,15 +55,16 @@ struct GeneralSettingsView: View {
                     step: 10
                 )
             }
-
-            Section("System") {
-                Text("Launch at login requires a signed app.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
         }
         .formStyle(.grouped)
         .padding()
+    }
+
+    private var currentShortcutLabel: String {
+        if let shortcut = KeyboardShortcuts.getShortcut(for: .toggleDictation) {
+            return "\(shortcut)"
+        }
+        return "F5 (default)"
     }
 }
 
