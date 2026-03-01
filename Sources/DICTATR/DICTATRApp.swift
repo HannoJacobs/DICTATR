@@ -9,17 +9,15 @@ struct DICTATRApp: App {
             if !appState.hasCompletedOnboarding {
                 OnboardingView()
                     .environment(appState)
+            } else if !appState.isModelLoaded {
+                ModelDownloadView()
+                    .environment(appState)
             } else {
                 MenuBarView()
                     .environment(appState)
             }
         }
         .menuBarExtraStyle(.window)
-
-        Settings {
-            SettingsView()
-                .environment(appState)
-        }
 
         Window("History", id: "history") {
             HistoryListView()

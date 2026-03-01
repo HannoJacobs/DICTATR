@@ -3,26 +3,63 @@ import SwiftUI
 struct MenuBarView: View {
     @Environment(AppState.self) private var appState
     @Environment(\.openWindow) private var openWindow
+    @State private var showingSettings = false
 
     var body: some View {
+        if showingSettings {
+            settingsPanel
+        } else {
+            mainPanel
+        }
+    }
+
+    // MARK: - Main Panel
+
+    private var mainPanel: some View {
         VStack(alignment: .leading, spacing: 12) {
-            // Status header
             statusSection
 
             Divider()
 
-            // Last transcription
             if let text = appState.lastTranscription {
                 lastTranscriptionSection(text: text)
                 Divider()
             }
 
-            // Actions
             actionsSection
         }
         .padding()
         .frame(width: 320)
     }
+
+    // MARK: - Settings Panel
+
+    private var settingsPanel: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Button {
+                    showingSettings = false
+                } label: {
+                    Label("Back", systemImage: "chevron.left")
+                }
+                .buttonStyle(.borderless)
+                Spacer()
+                Text("Settings")
+                    .font(.headline)
+                Spacer()
+            }
+            .padding(.horizontal)
+            .padding(.vertical, 8)
+
+            Divider()
+
+            GeneralSettingsView()
+                .environment(appState)
+        }
+        .frame(width: 360)
+    }
+
+    // MARK: - Status
 
     @ViewBuilder
     private var statusSection: some View {
@@ -57,6 +94,8 @@ struct MenuBarView: View {
         }
     }
 
+    // MARK: - Last Transcription
+
     @ViewBuilder
     private func lastTranscriptionSection(text: String) -> some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -79,9 +118,11 @@ struct MenuBarView: View {
         }
     }
 
+    // MARK: - Actions
+
     @ViewBuilder
     private var actionsSection: some View {
-        VStack(spacing: 4) {
+        VStack(spacing: 2) {
             if let error = appState.errorMessage {
                 HStack {
                     Image(systemName: "exclamationmark.triangle")
@@ -94,59 +135,69 @@ struct MenuBarView: View {
                 .padding(.bottom, 4)
             }
 
-            Button {
+            menuRow(
+                appState.currentState == .recording ? "Stop Recording" : "Start Dictation",
+                icon: appState.currentState == .recording ? "stop.fill" : "mic.fill"
+            ) {
                 appState.toggleRecording()
-            } label: {
-                Label(
-                    appState.currentState == .recording ? "Stop Recording" : "Start Dictation",
-                    systemImage: appState.currentState == .recording ? "stop.fill" : "mic.fill"
-                )
-                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .buttonStyle(.borderless)
-            .disabled(appState.currentState == .transcribing || !appState.isModelLoaded)
+            .opacity(appState.currentState == .transcribing || !appState.isModelLoaded ? 0.4 : 1)
 
             Divider()
 
-            Button {
+            menuRow(
+                PasteManager.checkAccessibilityPermission() ? "Accessibility: Granted" : "Grant Accessibility",
+                icon: PasteManager.checkAccessibilityPermission() ? "checkmark.circle.fill" : "lock.shield"
+            ) {
                 if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
                     NSWorkspace.shared.open(url)
                 }
-            } label: {
-                Label(
-                    PasteManager.checkAccessibilityPermission() ? "Accessibility: Granted" : "Grant Accessibility",
-                    systemImage: PasteManager.checkAccessibilityPermission() ? "checkmark.circle.fill" : "lock.shield"
-                )
-                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .buttonStyle(.borderless)
-            .foregroundStyle(PasteManager.checkAccessibilityPermission() ? .green : .orange)
+            .foregroundStyle(PasteManager.checkAccessibilityPermission() ? .green : .primary)
 
-            Button {
+            menuRow("History...", icon: "clock") {
                 openWindow(id: "history")
-            } label: {
-                Label("History...", systemImage: "clock")
-                    .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .buttonStyle(.borderless)
 
             Divider()
 
-            SettingsLink {
-                Label("Settings...", systemImage: "gear")
-                    .frame(maxWidth: .infinity, alignment: .leading)
+            menuRow("Settings...", icon: "gear") {
+                showingSettings = true
             }
-            .buttonStyle(.borderless)
 
-            Button {
-                NSApplication.shared.terminate(nil)
-            } label: {
-                Label("Quit DICTATR", systemImage: "power")
-                    .frame(maxWidth: .infinity, alignment: .leading)
+            menuRow("Quit DICTATR", icon: "power") {
+                DispatchQueue.main.async {
+                    NSApplication.shared.terminate(nil)
+                }
             }
-            .buttonStyle(.borderless)
         }
     }
+
+    // MARK: - Menu Row (tap gesture, not Button)
+
+    /// Full-width tappable menu row using onTapGesture instead of Button
+    /// to avoid MenuBarExtra window dismissal issues with button styles.
+    private func menuRow(
+        _ title: String,
+        icon: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: icon)
+                .frame(width: 20)
+            Text(title)
+            Spacer()
+        }
+        .padding(.vertical, 6)
+        .padding(.horizontal, 4)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            action()
+        }
+    }
+
+    // MARK: - Helpers
 
     private var statusTitle: String {
         switch appState.currentState {

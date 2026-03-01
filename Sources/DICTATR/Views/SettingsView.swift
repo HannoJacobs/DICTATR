@@ -1,5 +1,4 @@
 import KeyboardShortcuts
-import LaunchAtLogin
 import SwiftUI
 
 struct SettingsView: View {
@@ -53,7 +52,9 @@ struct GeneralSettingsView: View {
             }
 
             Section("System") {
-                LaunchAtLogin.Toggle("Launch at login")
+                Text("Launch at login requires a signed app.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)

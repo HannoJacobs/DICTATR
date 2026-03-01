@@ -87,27 +87,26 @@ final class AppState {
             }
         }
 
-        // Load model in background (store task for cancellation)
-        modelLoadTask = Task { [weak self] in
-            await self?.loadModel()
-        }
+        // Start model download immediately so it's ready when user opens the menu.
+        // If already cached, this completes in seconds.
+        startModelDownload()
     }
 
-
-    func loadModel() async {
-        do {
-            statusMessage = "Loading model..."
-            try await transcriptionEngine.loadModel()
-            if Task.isCancelled { return }
-            statusMessage = "Ready"
-        } catch {
-            if Task.isCancelled { return }
-            statusMessage = "Model load failed"
-            let modelError = "Model load failed: \(error.localizedDescription)"
-            if let existing = errorMessage {
-                errorMessage = "\(existing)\n\(modelError)"
-            } else {
-                errorMessage = modelError
+    func startModelDownload() {
+        guard !transcriptionEngine.isLoading, !transcriptionEngine.isModelLoaded else { return }
+        modelLoadTask?.cancel()
+        modelLoadTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                self.statusMessage = "Downloading model..."
+                try await self.transcriptionEngine.loadModel()
+                if Task.isCancelled { return }
+                self.statusMessage = "Ready"
+                self.errorMessage = nil
+            } catch {
+                if Task.isCancelled { return }
+                self.statusMessage = "Model load failed"
+                self.errorMessage = "Download failed: \(error.localizedDescription)"
             }
         }
     }

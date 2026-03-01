@@ -6,7 +6,8 @@ import WhisperKit
 final class TranscriptionEngine {
     private(set) var isModelLoaded = false
     private(set) var isLoading = false
-    private(set) var loadingProgress: String = ""
+    private(set) var downloadProgress: Double = 0
+    private(set) var loadingPhase: String = ""
 
     private var whisperKit: WhisperKit?
 
@@ -14,29 +15,58 @@ final class TranscriptionEngine {
         guard !isLoading else { return }
 
         isLoading = true
-        loadingProgress = "Downloading model..."
+        downloadProgress = 0
+        loadingPhase = "Downloading model..."
 
         do {
-            let pipe = try await WhisperKit(
-                WhisperKitConfig(verbose: true, logLevel: .debug, load: true)
+            // Use WhisperKit's recommended model for this device
+            let recommended = WhisperKit.recommendedModels()
+            let variant = recommended.default
+
+            // Step 1: Download model with progress tracking
+            let modelFolder = try await WhisperKit.download(
+                variant: variant,
+                progressCallback: { [weak self] progress in
+                    Task { @MainActor in
+                        self?.downloadProgress = progress.fractionCompleted
+                    }
+                }
             )
 
-            // Don't commit results if the task was cancelled during the await
             guard !Task.isCancelled else {
                 self.isLoading = false
-                self.loadingProgress = ""
+                self.loadingPhase = ""
+                throw CancellationError()
+            }
+
+            // Step 2: Load the downloaded model into memory
+            loadingPhase = "Loading model..."
+            downloadProgress = 1.0
+
+            let pipe = try await WhisperKit(
+                WhisperKitConfig(
+                    modelFolder: modelFolder.path,
+                    verbose: true,
+                    logLevel: .debug,
+                    load: true,
+                    download: false
+                )
+            )
+
+            guard !Task.isCancelled else {
+                self.isLoading = false
+                self.loadingPhase = ""
                 throw CancellationError()
             }
 
             self.whisperKit = pipe
             self.isModelLoaded = true
             self.isLoading = false
-            self.loadingProgress = ""
+            self.loadingPhase = ""
         } catch {
-            // Reset isLoading on failure so the user can retry.
-            // Without this, the guard above permanently blocks all future attempts.
             self.isLoading = false
-            self.loadingProgress = ""
+            self.loadingPhase = ""
+            self.downloadProgress = 0
             throw error
         }
     }
