@@ -206,6 +206,7 @@
     </a>
 
     <p class="sub">Free &amp; open source &nbsp;·&nbsp; v1.0 &nbsp;·&nbsp; ~5 MB</p>
+    <p id="release-time" style="font-size:0.72rem;color:#3a3a3a;margin-top:-0.5rem;margin-bottom:3.5rem"></p>
 
     <div class="features">
       <div class="feature">
@@ -248,5 +249,18 @@
     </p>
 
   </div>
+  <script>
+    fetch('https://api.github.com/repos/HannoJacobs/DICTATR/releases/latest')
+      .then(r => r.json())
+      .then(data => {
+        const asset = data.assets.find(a => a.name === 'DICTATR.dmg');
+        if (!asset) return;
+        const d = new Date(asset.updated_at);
+        const fmt = d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
+          + ' at ' + d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+        document.getElementById('release-time').textContent = 'DMG uploaded ' + fmt;
+      })
+      .catch(() => {});
+  </script>
 </body>
 </html>
