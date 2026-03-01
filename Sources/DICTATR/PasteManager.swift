@@ -3,6 +3,7 @@ import ApplicationServices
 import CoreGraphics
 
 struct PasteManager {
+    @MainActor
     static func paste(text: String, autoPaste: Bool = true) async {
         // Write to system clipboard
         let pasteboard = NSPasteboard.general

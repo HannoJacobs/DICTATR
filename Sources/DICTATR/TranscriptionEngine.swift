@@ -21,6 +21,13 @@ final class TranscriptionEngine {
                 WhisperKitConfig(model: name, verbose: false, logLevel: .error)
             )
 
+            // Don't commit results if the task was cancelled during the await
+            guard !Task.isCancelled else {
+                self.isLoading = false
+                self.loadingProgress = ""
+                throw CancellationError()
+            }
+
             self.whisperKit = pipe
             self.isModelLoaded = true
             self.isLoading = false

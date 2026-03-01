@@ -88,7 +88,7 @@ final class DatabaseManager: Sendable {
         }
     }
 
-    func search(query: String) throws -> [DictationRecord] {
+    func search(query: String, limit: Int = 200) throws -> [DictationRecord] {
         // Escape SQL LIKE wildcard characters so they are matched literally
         let escaped = query
             .replacingOccurrences(of: "\\", with: "\\\\")
@@ -98,6 +98,7 @@ final class DatabaseManager: Sendable {
             try DictationRecord
                 .filter(sql: "text LIKE ? ESCAPE '\\'", arguments: ["%\(escaped)%"])
                 .order(Column("createdAt").desc, Column("id").desc)
+                .limit(limit)
                 .fetchAll(db)
         }
     }
