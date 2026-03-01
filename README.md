@@ -197,6 +197,16 @@ SwiftUI `Button` inside a `MenuBarExtra(.window)` scene has unreliable hit-testi
 **Fix:** use `HStack` + `.contentShape(Rectangle())` + `.onTapGesture` for full-width,
 reliable tap targets. See `MenuBarView.swift`.
 
+### Moving the project folder breaks Xcode (no targets / no run destination)
+
+If you move the project to a new folder, Xcode's "Recent Projects" entry still points to
+the old location. Opening from there causes Xcode to show **"Cannot build without a run
+destination"** and the scheme list will be empty with no targets.
+
+**Fix:** open the project fresh by double-clicking **`Package.swift`** in Finder (or
+File → Open → select `Package.swift`). Do not open via Xcode's recent projects list after
+a move.
+
 ### Model memory appears low in Activity Monitor
 
 The WhisperKit model runs on Apple's Neural Engine using unified memory. This memory is
