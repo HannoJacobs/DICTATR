@@ -5,10 +5,14 @@ final class DatabaseManager: Sendable {
     private let dbQueue: DatabaseQueue
 
     init() throws {
-        let appSupportURL = FileManager.default.urls(
+        guard let appSupportBase = FileManager.default.urls(
             for: .applicationSupportDirectory,
             in: .userDomainMask
-        ).first!.appendingPathComponent("DICTATR", isDirectory: true)
+        ).first else {
+            throw DatabaseManagerError.applicationSupportNotFound
+        }
+
+        let appSupportURL = appSupportBase.appendingPathComponent("DICTATR", isDirectory: true)
 
         try FileManager.default.createDirectory(
             at: appSupportURL,
@@ -45,7 +49,7 @@ final class DatabaseManager: Sendable {
     func fetchRecent(limit: Int = 50) throws -> [DictationRecord] {
         try dbQueue.read { db in
             try DictationRecord
-                .order(DictationRecord.orderByRecent)
+                .order(Column("createdAt").desc, Column("id").desc)
                 .limit(limit)
                 .fetchAll(db)
         }
@@ -58,22 +62,29 @@ final class DatabaseManager: Sendable {
     }
 
     func deleteOld(keepLast count: Int) throws {
-        try dbQueue.write { db in
-            let totalCount = try DictationRecord.fetchCount(db)
-            if totalCount > count {
-                let toDelete = try DictationRecord
-                    .order(DictationRecord.orderByRecent)
-                    .limit(totalCount - count, offset: count)
-                    .fetchAll(db)
+        guard count > 0 else { return }
 
-                for record in toDelete {
-                    // Delete associated audio file if it exists
-                    if let audioPath = record.audioFilePath {
-                        try? FileManager.default.removeItem(atPath: audioPath)
-                    }
-                    _ = try record.delete(db)
-                }
+        // Collect paths to delete inside the transaction, then delete files
+        // outside the transaction to avoid holding the DB write lock during I/O.
+        let pathsToDelete: [String] = try dbQueue.write { db in
+            let totalCount = try DictationRecord.fetchCount(db)
+            guard totalCount > count else { return [] }
+
+            let toDelete = try DictationRecord
+                .order(Column("createdAt").desc, Column("id").desc)
+                .limit(totalCount - count, offset: count)
+                .fetchAll(db)
+
+            let paths = toDelete.compactMap { $0.audioFilePath }
+
+            for record in toDelete {
+                _ = try record.delete(db)
             }
+            return paths
+        }
+
+        for path in pathsToDelete {
+            try? FileManager.default.removeItem(atPath: path)
         }
     }
 
@@ -86,8 +97,19 @@ final class DatabaseManager: Sendable {
         return try dbQueue.read { db in
             try DictationRecord
                 .filter(sql: "text LIKE ? ESCAPE '\\'", arguments: ["%\(escaped)%"])
-                .order(DictationRecord.orderByRecent)
+                .order(Column("createdAt").desc, Column("id").desc)
                 .fetchAll(db)
+        }
+    }
+}
+
+enum DatabaseManagerError: LocalizedError {
+    case applicationSupportNotFound
+
+    var errorDescription: String? {
+        switch self {
+        case .applicationSupportNotFound:
+            return "Could not locate Application Support directory"
         }
     }
 }

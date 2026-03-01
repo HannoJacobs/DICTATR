@@ -32,7 +32,3 @@ extension DictationRecord: FetchableRecord, PersistableRecord {
         id = inserted.rowID
     }
 }
-
-extension DictationRecord {
-    static let orderByRecent = Column("createdAt").desc
-}

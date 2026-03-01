@@ -6,7 +6,7 @@ struct OnboardingView: View {
     @State private var microphoneGranted = false
     @State private var accessibilityGranted = false
     @State private var currentStep = 0
-    @State private var accessibilityTimer: Timer?
+    @State private var accessibilityPollTask: Task<Void, Never>?
 
     var body: some View {
         VStack(spacing: 24) {
@@ -65,8 +65,8 @@ struct OnboardingView: View {
             checkPermissions()
         }
         .onDisappear {
-            accessibilityTimer?.invalidate()
-            accessibilityTimer = nil
+            accessibilityPollTask?.cancel()
+            accessibilityPollTask = nil
         }
     }
 
@@ -127,12 +127,19 @@ struct OnboardingView: View {
 
     private func requestAccessibilityAccess() {
         PasteManager.requestAccessibilityPermission()
-        // Poll for accessibility grant since there's no callback
-        accessibilityTimer?.invalidate()
-        accessibilityTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { timer in
-            if PasteManager.checkAccessibilityPermission() {
-                accessibilityGranted = true
-                timer.invalidate()
+        // Cancel any existing poll
+        accessibilityPollTask?.cancel()
+        // Use a structured Task for polling instead of Timer.
+        // This automatically cancels when the view disappears (via onDisappear),
+        // ensures @State is mutated on the MainActor, and has a timeout.
+        accessibilityPollTask = Task { @MainActor in
+            for _ in 0..<120 { // Poll for up to 2 minutes
+                if Task.isCancelled { break }
+                if PasteManager.checkAccessibilityPermission() {
+                    accessibilityGranted = true
+                    return
+                }
+                try? await Task.sleep(for: .seconds(1))
             }
         }
     }
