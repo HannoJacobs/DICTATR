@@ -143,10 +143,9 @@ final class AppState {
     }
 
     private func stopRecordingAndTranscribe() {
-        recordingIndicator.hide()
-
         guard let result = audioRecorder.stopRecording() else {
             // Reset to idle if stop fails — prevents state stuck at .recording
+            recordingIndicator.hide()
             currentState = .idle
             statusMessage = "Recording failed"
             return
@@ -155,12 +154,14 @@ final class AppState {
         // Skip transcription for empty or trivially short recordings
         let fileSize = (try? FileManager.default.attributesOfItem(atPath: result.url.path)[.size] as? Int) ?? 0
         if result.duration < 0.3 || fileSize < 1000 {
+            recordingIndicator.hide()
             statusMessage = "Recording too short"
             currentState = .idle
             try? FileManager.default.removeItem(at: result.url)
             return
         }
 
+        recordingIndicator.showProcessing()
         currentState = .transcribing
         statusMessage = "Transcribing..."
 
@@ -181,6 +182,7 @@ final class AppState {
                 }
 
                 if text.isEmpty {
+                    self.recordingIndicator.hide()
                     self.statusMessage = "No speech detected"
                     self.currentState = .idle
                     try? FileManager.default.removeItem(at: result.url)
@@ -211,6 +213,7 @@ final class AppState {
                 // Clean up temp audio file after transcription
                 try? FileManager.default.removeItem(at: result.url)
 
+                self.recordingIndicator.showDone()
                 self.errorMessage = nil
                 self.statusMessage = "Done"
                 self.currentState = .idle
@@ -219,6 +222,7 @@ final class AppState {
                 // Clean up temp audio file on failure
                 try? FileManager.default.removeItem(at: result.url)
                 guard let self else { return }
+                self.recordingIndicator.hide()
                 self.errorMessage = "Transcription failed: \(error.localizedDescription)"
                 self.statusMessage = "Error"
                 self.currentState = .idle
