@@ -2,22 +2,29 @@ import AppKit
 import ApplicationServices
 import CoreGraphics
 
+enum PasteResult {
+    case pasted
+    case copiedOnly
+    case noAccessibility
+}
+
 struct PasteManager {
     @MainActor
-    static func paste(text: String, autoPaste: Bool = true) async {
+    static func paste(text: String, autoPaste: Bool = true) async -> PasteResult {
         // Write to system clipboard
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
 
-        guard autoPaste else { return }
-        guard checkAccessibilityPermission() else { return }
+        guard autoPaste else { return .copiedOnly }
+        guard checkAccessibilityPermission() else { return .noAccessibility }
 
         // Small delay to ensure clipboard is ready
         try? await Task.sleep(for: .milliseconds(50))
 
         // Simulate Cmd+V keystroke
         simulatePaste()
+        return .pasted
     }
 
     static func checkAccessibilityPermission() -> Bool {

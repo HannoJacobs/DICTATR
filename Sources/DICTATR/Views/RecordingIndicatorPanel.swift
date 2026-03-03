@@ -56,9 +56,10 @@ final class RecordingIndicatorPanel {
         state.phase = .processing
     }
 
-    func showDone() {
+    func showDone(pasted: Bool) {
         autoDismissTask?.cancel()
         state.phase = .done
+        state.didPaste = pasted
         autoDismissTask = Task {
             try? await Task.sleep(for: .seconds(2))
             guard !Task.isCancelled else { return }
@@ -90,6 +91,7 @@ enum IndicatorPhase {
 final class IndicatorState {
     var phase: IndicatorPhase = .idle
     var audioRecorder: AudioRecorder?
+    var didPaste = false
 }
 
 // MARK: - SwiftUI View
@@ -131,7 +133,7 @@ private struct RecordingIndicatorView: View {
                         .font(.system(size: 14))
                         .foregroundStyle(.green)
 
-                    Text("Copied to clipboard")
+                    Text(state.didPaste ? "Pasted" : "Copied to clipboard")
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(.white)
                 }

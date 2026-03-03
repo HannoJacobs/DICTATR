@@ -51,7 +51,14 @@ final class AppState {
     // Stored properties with didSet so @Observable tracks changes correctly.
     // Computed properties are NOT instrumented by @Observable, so using them
     // would cause SwiftUI views to never re-render on value changes.
-    var autoPasteEnabled: Bool = UserDefaults.standard.bool(forKey: "autoPasteEnabled") {
+    var autoPasteEnabled: Bool = {
+        // register(defaults:) runs in init() — too late for stored property initializers.
+        // Check explicitly so the first-launch default is true.
+        if UserDefaults.standard.object(forKey: "autoPasteEnabled") == nil {
+            return true
+        }
+        return UserDefaults.standard.bool(forKey: "autoPasteEnabled")
+    }() {
         didSet { UserDefaults.standard.set(autoPasteEnabled, forKey: "autoPasteEnabled") }
     }
 
@@ -223,7 +230,11 @@ final class AppState {
                 self.lastTranscription = text
 
                 // Paste to active app
-                await PasteManager.paste(text: text, autoPaste: self.autoPasteEnabled)
+                let pasteResult = await PasteManager.paste(text: text, autoPaste: self.autoPasteEnabled)
+
+                if pasteResult == .noAccessibility {
+                    self.errorMessage = "Auto-paste requires Accessibility permission. Text copied to clipboard."
+                }
 
                 // Save to database — don't let DB failure undo the transcription
                 if let db = self.databaseManager {
@@ -244,9 +255,11 @@ final class AppState {
                 // Clean up temp audio file after transcription
                 try? FileManager.default.removeItem(at: result.url)
 
-                self.recordingIndicator.showDone()
+                self.recordingIndicator.showDone(pasted: pasteResult == .pasted)
                 NSSound(named: .init("Glass"))?.play()
-                self.errorMessage = nil
+                if pasteResult != .noAccessibility {
+                    self.errorMessage = nil
+                }
                 self.statusMessage = "Done"
                 self.currentState = .idle
 
