@@ -37,6 +37,8 @@ final class AudioRecorder {
     private var recordingStartTime: TimeInterval?
     private var durationTimer: Timer?
     private var configObserver: NSObjectProtocol?
+    private var configChangeRetries = 0
+    private static let maxConfigChangeRetries = 3
 
     // Thread-safe flags readable from the real-time audio thread.
     // @Observable's isRecording is not safe to read from the audio thread.
@@ -45,9 +47,10 @@ final class AudioRecorder {
     private let _framesWritten = OSAllocatedUnfairLock(initialState: Int64(0))
     private let _droppedFrames = OSAllocatedUnfairLock(initialState: Int64(0))
 
-    func startRecording() async throws -> URL {
+    func startRecording() throws -> URL {
         // Guard against double-start — clean up any existing session first
         if isRecording {
+            Self.logger.warning("startRecording() called while already recording — cleaning up previous session")
             if let result = stopRecording() {
                 try? FileManager.default.removeItem(at: result.url)
             }
@@ -59,27 +62,18 @@ final class AudioRecorder {
 
         let engine = AVAudioEngine()
         let inputNode = engine.inputNode
-        var inputFormat = inputNode.outputFormat(forBus: 0)
+        let inputFormat = inputNode.outputFormat(forBus: 0)
 
         // Bluetooth devices (AirPods, etc.) switch from AAC to HFP codec when the mic
-        // activates, which briefly reports sampleRate=0. Retry a few times to let it settle.
+        // activates, which briefly reports sampleRate=0. Instead of blocking with a retry
+        // loop, we start immediately and let the configurationChangeNotification handler
+        // reinstall the tap once the codec switch completes. Frames are dropped until then,
+        // tracked by _droppedFrames, and caught by the framesWritten < 800 check at stop.
         if inputFormat.sampleRate == 0 || inputFormat.channelCount == 0 {
-            Self.logger.info("Input format not ready (sampleRate=\(inputFormat.sampleRate)), waiting for Bluetooth codec switch...")
-            for attempt in 1...3 {
-                try await Task.sleep(for: .milliseconds(300))
-                inputFormat = inputNode.outputFormat(forBus: 0)
-                if inputFormat.sampleRate > 0, inputFormat.channelCount > 0 {
-                    Self.logger.info("Input format ready after \(attempt) retries")
-                    break
-                }
-            }
+            Self.logger.warning("Input format not ready (sampleRate=\(inputFormat.sampleRate), channels=\(inputFormat.channelCount)) — Bluetooth codec switch likely in progress. Will recover via config change handler.")
+        } else {
+            Self.logger.info("Recording with input format: \(inputFormat.sampleRate)Hz, \(inputFormat.channelCount)ch")
         }
-
-        guard inputFormat.sampleRate > 0, inputFormat.channelCount > 0 else {
-            Self.logger.error("Invalid input format after retries: sampleRate=\(inputFormat.sampleRate), channels=\(inputFormat.channelCount)")
-            throw AudioRecorderError.invalidInputFormat
-        }
-        Self.logger.info("Recording with input format: \(inputFormat.sampleRate)Hz, \(inputFormat.channelCount)ch")
 
         // Target format: 16kHz mono Float32 (what Whisper expects)
         guard let targetFormat = AVAudioFormat(
@@ -89,10 +83,6 @@ final class AudioRecorder {
             interleaved: false
         ) else {
             throw AudioRecorderError.formatCreationFailed
-        }
-
-        guard let converter = AVAudioConverter(from: inputFormat, to: targetFormat) else {
-            throw AudioRecorderError.converterCreationFailed
         }
 
         let file = try AVAudioFile(
@@ -107,62 +97,30 @@ final class AudioRecorder {
         self._isCapturing.withLock { $0 = true }
         self._framesWritten.withLock { $0 = 0 }
         self._droppedFrames.withLock { $0 = 0 }
+        self.configChangeRetries = 0
 
-        inputNode.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { [weak self, file] buffer, _ in
-            // Read atomic flag instead of @Observable isRecording (audio thread safety).
-            // Capture `file` directly to avoid accessing self.outputFile from the audio thread (data race).
-            guard let self, self._isCapturing.withLock({ $0 }) else { return }
-            let outFile = file
-
-            let frameCount = AVAudioFrameCount(
-                Double(buffer.frameLength) * targetFormat.sampleRate / inputFormat.sampleRate
-            )
-            guard frameCount > 0,
-                  let convertedBuffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: frameCount)
-            else {
-                let dropped = self._droppedFrames.withLock { count -> Int64 in
-                    count += 1
-                    return count
-                }
-                // Log every 100th drop to avoid spamming the audio thread
-                if dropped % 100 == 1 {
-                    Self.logger.warning("Audio frame dropped (\(dropped) total): frameCount=0, inputSR=\(inputFormat.sampleRate)")
-                }
-                return
+        // Only install the tap if the input format is valid. When sampleRate is 0
+        // (Bluetooth codec switch in progress), skip the tap — the config change
+        // handler will install it once the format becomes valid.
+        let formatValid = inputFormat.sampleRate > 0 && inputFormat.channelCount > 0
+        if formatValid {
+            guard let converter = AVAudioConverter(from: inputFormat, to: targetFormat) else {
+                self._isCapturing.withLock { $0 = false }
+                self.outputFile = nil
+                try? FileManager.default.removeItem(at: fileURL)
+                throw AudioRecorderError.converterCreationFailed
             }
-
-            var error: NSError?
-            // Track whether input data has already been supplied to avoid returning
-            // the same buffer multiple times (the converter may call the block repeatedly)
-            var inputConsumed = false
-            let status = converter.convert(to: convertedBuffer, error: &error) { inNumPackets, outStatus in
-                if inputConsumed {
-                    outStatus.pointee = .noDataNow
-                    return nil
-                }
-                inputConsumed = true
-                outStatus.pointee = .haveData
-                return buffer
-            }
-
-            if status == .haveData, error == nil {
-                do {
-                    try outFile.write(from: convertedBuffer)
-                    self._framesWritten.withLock { $0 += Int64(convertedBuffer.frameLength) }
-                } catch {
-                    Self.logger.error("Failed to write audio buffer: \(error.localizedDescription)")
-                }
-            } else if let error {
-                Self.logger.warning("Audio conversion failed: status=\(status.rawValue), error=\(error.localizedDescription)")
-            }
+            installTap(on: inputNode, inputFormat: inputFormat, targetFormat: targetFormat, converter: converter, file: file)
         }
 
         do {
             try engine.start()
+            Self.logger.info("Engine started (tapInstalled=\(formatValid), file=\(fileURL.lastPathComponent))")
         } catch {
+            Self.logger.error("Engine failed to start: \(error.localizedDescription)")
             // Clean up the tap, file, and state since engine failed to start
             self._isCapturing.withLock { $0 = false }
-            inputNode.removeTap(onBus: 0)
+            if formatValid { inputNode.removeTap(onBus: 0) }
             self.outputFile = nil
             try? FileManager.default.removeItem(at: fileURL)
             throw error
@@ -195,45 +153,38 @@ final class AudioRecorder {
         return fileURL
     }
 
-    private func handleConfigurationChange(targetFormat: AVAudioFormat) {
-        guard isRecording, let engine = audioEngine, let file = outputFile else { return }
-
-        Self.logger.info("Audio configuration changed during recording — reinstalling tap")
-
-        let inputNode = engine.inputNode
-        inputNode.removeTap(onBus: 0)
-
-        let newInputFormat = inputNode.outputFormat(forBus: 0)
-
-        guard newInputFormat.sampleRate > 0, newInputFormat.channelCount > 0 else {
-            Self.logger.warning("New input format invalid after config change: sampleRate=\(newInputFormat.sampleRate), channels=\(newInputFormat.channelCount). Continuing with partial recording.")
-            return
-        }
-
-        guard let newConverter = AVAudioConverter(from: newInputFormat, to: targetFormat) else {
-            Self.logger.error("Failed to create converter for new input format after config change")
-            return
-        }
-
-        Self.logger.info("Reinstalling tap with new format: \(newInputFormat.sampleRate)Hz, \(newInputFormat.channelCount)ch")
-
-        inputNode.installTap(onBus: 0, bufferSize: 4096, format: newInputFormat) { [weak self, file] buffer, _ in
+    /// Installs the audio tap on the input node with the given format and converter.
+    /// Shared by startRecording() (initial install) and handleConfigurationChange() (recovery).
+    private func installTap(
+        on inputNode: AVAudioInputNode,
+        inputFormat: AVAudioFormat,
+        targetFormat: AVAudioFormat,
+        converter: AVAudioConverter,
+        file: AVAudioFile
+    ) {
+        inputNode.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { [weak self, file] buffer, _ in
             guard let self, self._isCapturing.withLock({ $0 }) else { return }
             let outFile = file
 
             let frameCount = AVAudioFrameCount(
-                Double(buffer.frameLength) * targetFormat.sampleRate / newInputFormat.sampleRate
+                Double(buffer.frameLength) * targetFormat.sampleRate / inputFormat.sampleRate
             )
             guard frameCount > 0,
                   let convertedBuffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: frameCount)
             else {
-                self._droppedFrames.withLock { $0 += 1 }
+                let dropped = self._droppedFrames.withLock { count -> Int64 in
+                    count += 1
+                    return count
+                }
+                if dropped % 100 == 1 {
+                    Self.logger.warning("Audio frame dropped (\(dropped) total): frameCount=0, inputSR=\(inputFormat.sampleRate)")
+                }
                 return
             }
 
             var error: NSError?
             var inputConsumed = false
-            let status = newConverter.convert(to: convertedBuffer, error: &error) { _, outStatus in
+            let status = converter.convert(to: convertedBuffer, error: &error) { _, outStatus in
                 if inputConsumed {
                     outStatus.pointee = .noDataNow
                     return nil
@@ -251,9 +202,45 @@ final class AudioRecorder {
                     Self.logger.error("Failed to write audio buffer: \(error.localizedDescription)")
                 }
             } else if let error {
-                Self.logger.warning("Audio conversion failed after config change: \(error.localizedDescription)")
+                Self.logger.warning("Audio conversion failed: status=\(status.rawValue), error=\(error.localizedDescription)")
             }
         }
+    }
+
+    private func handleConfigurationChange(targetFormat: AVAudioFormat) {
+        guard isRecording, let engine = audioEngine, let file = outputFile else { return }
+
+        Self.logger.info("Audio configuration changed during recording — reinstalling tap")
+
+        let inputNode = engine.inputNode
+        inputNode.removeTap(onBus: 0)
+
+        let newInputFormat = inputNode.outputFormat(forBus: 0)
+
+        guard newInputFormat.sampleRate > 0, newInputFormat.channelCount > 0 else {
+            // Format still invalid (transitional state during Bluetooth codec switch).
+            // Schedule a delayed retry — the format usually settles within a few hundred ms.
+            configChangeRetries += 1
+            if configChangeRetries <= Self.maxConfigChangeRetries {
+                Self.logger.warning("Format still invalid after config change (attempt \(self.configChangeRetries)/\(Self.maxConfigChangeRetries)), retrying in 200ms...")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+                    self?.handleConfigurationChange(targetFormat: targetFormat)
+                }
+            } else {
+                Self.logger.warning("Format still invalid after \(Self.maxConfigChangeRetries) retries: sampleRate=\(newInputFormat.sampleRate), channels=\(newInputFormat.channelCount). Giving up — frame count check will catch this at stop.")
+            }
+            return
+        }
+
+        configChangeRetries = 0
+
+        guard let newConverter = AVAudioConverter(from: newInputFormat, to: targetFormat) else {
+            Self.logger.error("Failed to create converter for new input format after config change")
+            return
+        }
+
+        Self.logger.info("Reinstalling tap with new format: \(newInputFormat.sampleRate)Hz, \(newInputFormat.channelCount)ch")
+        installTap(on: inputNode, inputFormat: newInputFormat, targetFormat: targetFormat, converter: newConverter, file: file)
 
         do {
             try engine.start()
@@ -305,7 +292,6 @@ final class AudioRecorder {
 enum AudioRecorderError: LocalizedError {
     case formatCreationFailed
     case converterCreationFailed
-    case invalidInputFormat
 
     var errorDescription: String? {
         switch self {
@@ -313,8 +299,6 @@ enum AudioRecorderError: LocalizedError {
             return "Failed to create target audio format"
         case .converterCreationFailed:
             return "Failed to create audio converter"
-        case .invalidInputFormat:
-            return "No microphone input detected. Check your audio device."
         }
     }
 }

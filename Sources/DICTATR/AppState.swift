@@ -32,6 +32,7 @@
 import AppKit
 import Foundation
 import KeyboardShortcuts
+import os
 import SwiftUI
 
 enum DictationState: Equatable {
@@ -43,6 +44,8 @@ enum DictationState: Equatable {
 @Observable
 @MainActor
 final class AppState {
+    private static let logger = Logger(subsystem: "com.dictatr", category: "AppState")
+
     var currentState: DictationState = .idle
     var lastTranscription: String?
     var statusMessage: String = "Ready"
@@ -167,20 +170,19 @@ final class AppState {
             return
         }
 
-        currentState = .recording
-        statusMessage = "Recording..."
-        errorMessage = nil
-
-        Task {
-            do {
-                _ = try await audioRecorder.startRecording()
-                NSSound(named: .init("Tink"))?.play()
-                recordingIndicator.show(audioRecorder: audioRecorder)
-            } catch {
-                currentState = .idle
-                statusMessage = "Ready"
-                errorMessage = "Failed to start recording: \(error.localizedDescription)"
-            }
+        do {
+            let url = try audioRecorder.startRecording()
+            currentState = .recording
+            statusMessage = "Recording..."
+            errorMessage = nil
+            NSSound(named: .init("Tink"))?.play()
+            recordingIndicator.show(audioRecorder: audioRecorder)
+            Self.logger.info("Recording started → \(url.lastPathComponent)")
+        } catch {
+            currentState = .idle
+            statusMessage = "Ready"
+            errorMessage = "Failed to start recording: \(error.localizedDescription)"
+            Self.logger.error("Recording failed to start: \(error.localizedDescription)")
         }
     }
 
@@ -188,15 +190,19 @@ final class AppState {
         NSSound(named: .init("Pop"))?.play()
         guard let result = audioRecorder.stopRecording() else {
             // Reset to idle if stop fails — prevents state stuck at .recording
+            Self.logger.error("stopRecording() returned nil — recorder was not active")
             recordingIndicator.hide()
             currentState = .idle
             statusMessage = "Recording failed"
             return
         }
 
+        Self.logger.info("Recording stopped: \(String(format: "%.1f", result.duration))s, \(result.framesWritten) frames, file=\(result.url.lastPathComponent)")
+
         // Skip transcription for empty or trivially short recordings
         let fileSize = (try? FileManager.default.attributesOfItem(atPath: result.url.path)[.size] as? Int) ?? 0
         if result.duration < 0.3 || fileSize < 1000 {
+            Self.logger.info("Recording too short (duration=\(String(format: "%.2f", result.duration))s, fileSize=\(fileSize)B) — skipping transcription")
             recordingIndicator.hide()
             statusMessage = "Recording too short"
             currentState = .idle
@@ -206,6 +212,7 @@ final class AppState {
 
         // Detect hardware/driver issues where recording ran but no audio was captured
         if result.framesWritten < 800 { // ~50ms at 16kHz
+            Self.logger.warning("No audio captured: \(result.framesWritten) frames written in \(String(format: "%.1f", result.duration))s — likely mic/Bluetooth issue")
             recordingIndicator.hide()
             statusMessage = "No audio captured. Check your microphone."
             currentState = .idle
@@ -234,6 +241,7 @@ final class AppState {
                 }
 
                 if text.isEmpty {
+                    Self.logger.info("Transcription returned empty text — no speech detected")
                     self.recordingIndicator.hide()
                     self.statusMessage = "No speech detected"
                     self.currentState = .idle
@@ -241,10 +249,12 @@ final class AppState {
                     return
                 }
 
+                Self.logger.info("Transcription complete: \(text.count) chars")
                 self.lastTranscription = text
 
                 // Paste to active app
                 let pasteResult = await PasteManager.paste(text: text, autoPaste: self.autoPasteEnabled)
+                Self.logger.info("Paste result: \(String(describing: pasteResult))")
 
                 if pasteResult == .noAccessibility {
                     self.errorMessage = "Settings → search \"Privacy\" → Accessibility → toggle DICTATR on"
@@ -281,6 +291,7 @@ final class AppState {
                 // Clean up temp audio file on failure
                 try? FileManager.default.removeItem(at: result.url)
                 guard let self else { return }
+                Self.logger.error("Transcription failed: \(error.localizedDescription)")
                 self.recordingIndicator.hide()
                 self.errorMessage = "Transcription failed: \(error.localizedDescription)"
                 self.statusMessage = "Error"
