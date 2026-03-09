@@ -242,7 +242,7 @@ final class AppState {
                 let pasteResult = await PasteManager.paste(text: text, autoPaste: self.autoPasteEnabled)
 
                 if pasteResult == .noAccessibility {
-                    self.errorMessage = "Auto-paste requires Accessibility permission. Text copied to clipboard."
+                    self.errorMessage = "Enable Accessibility: Settings → Privacy & Security → Accessibility"
                 }
 
                 // Save to database — don't let DB failure undo the transcription
