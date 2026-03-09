@@ -121,6 +121,11 @@ final class AppState {
             self.errorMessage = "History unavailable: database failed to load."
         }
 
+        // Wire up auto-stop callback from AudioRecorder (watchdog timeout, engine failure)
+        audioRecorder.onRecordingFailed = { [weak self] message in
+            self?.handleRecordingFailure(message: message)
+        }
+
         // Register hotkey — dispatch to MainActor since callback thread is unspecified
         hotkeyManager = HotkeyManager { [weak self] in
             Task { @MainActor in
@@ -186,11 +191,20 @@ final class AppState {
         }
     }
 
+    private func handleRecordingFailure(message: String) {
+        Self.logger.error("Recording auto-stopped: \(message)")
+        recordingIndicator.hide()
+        currentState = .idle
+        statusMessage = "Recording failed"
+        errorMessage = message
+    }
+
     private func stopRecordingAndTranscribe() {
         NSSound(named: .init("Pop"))?.play()
         guard let result = audioRecorder.stopRecording() else {
-            // Reset to idle if stop fails — prevents state stuck at .recording
-            Self.logger.error("stopRecording() returned nil — recorder was not active")
+            // Reset to idle if stop fails — force-reset ensures full cleanup
+            Self.logger.error("stopRecording() returned nil — force-resetting recorder")
+            audioRecorder.forceReset()
             recordingIndicator.hide()
             currentState = .idle
             statusMessage = "Recording failed"

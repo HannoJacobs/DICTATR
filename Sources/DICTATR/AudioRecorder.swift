@@ -39,6 +39,9 @@ final class AudioRecorder {
     private var configObserver: NSObjectProtocol?
     private var configChangeRetries = 0
     private static let maxConfigChangeRetries = 3
+    private var lastConfigChangeTime: TimeInterval = 0
+    private var noAudioWatchdog: Timer?
+    var onRecordingFailed: ((String) -> Void)?
 
     // Thread-safe flags readable from the real-time audio thread.
     // @Observable's isRecording is not safe to read from the audio thread.
@@ -98,6 +101,7 @@ final class AudioRecorder {
         self._framesWritten.withLock { $0 = 0 }
         self._droppedFrames.withLock { $0 = 0 }
         self.configChangeRetries = 0
+        self.lastConfigChangeTime = 0
 
         // Only install the tap if the input format is valid. When sampleRate is 0
         // (Bluetooth codec switch in progress), skip the tap — the config change
@@ -147,6 +151,14 @@ final class AudioRecorder {
             Task { @MainActor in
                 guard let self, let start = self.recordingStartTime else { return }
                 self.recordingDuration = ProcessInfo.processInfo.systemUptime - start
+            }
+        }
+
+        // Watchdog: if recording for 5s with essentially no audio, auto-stop and report.
+        // Catches the case where config change never fires (no recovery possible).
+        noAudioWatchdog = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: false) { [weak self] _ in
+            Task { @MainActor in
+                self?.checkNoAudioWatchdog()
             }
         }
 
@@ -207,8 +219,21 @@ final class AudioRecorder {
         }
     }
 
-    private func handleConfigurationChange(targetFormat: AVAudioFormat) {
+    private func handleConfigurationChange(targetFormat: AVAudioFormat, isRetry: Bool = false) {
         guard isRecording, let engine = audioEngine, let file = outputFile else { return }
+
+        // Debounce notification-driven calls to prevent restart→notification→restart loops.
+        // When engine.start() triggers a config change, the notification fires before the
+        // main run loop processes other events (like F5), starving the UI. This 300ms gate
+        // breaks the cycle. Self-initiated retries skip the debounce.
+        if !isRetry {
+            let now = ProcessInfo.processInfo.systemUptime
+            guard now - lastConfigChangeTime > 0.3 else {
+                Self.logger.info("Config change debounced (fired \(String(format: "%.0f", (now - self.lastConfigChangeTime) * 1000))ms after previous)")
+                return
+            }
+            lastConfigChangeTime = now
+        }
 
         Self.logger.info("Audio configuration changed during recording — reinstalling tap")
 
@@ -224,7 +249,7 @@ final class AudioRecorder {
             if configChangeRetries <= Self.maxConfigChangeRetries {
                 Self.logger.warning("Format still invalid after config change (attempt \(self.configChangeRetries)/\(Self.maxConfigChangeRetries)), retrying in 200ms...")
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
-                    self?.handleConfigurationChange(targetFormat: targetFormat)
+                    self?.handleConfigurationChange(targetFormat: targetFormat, isRetry: true)
                 }
             } else {
                 Self.logger.warning("Format still invalid after \(Self.maxConfigChangeRetries) retries: sampleRate=\(newInputFormat.sampleRate), channels=\(newInputFormat.channelCount). Giving up — frame count check will catch this at stop.")
@@ -242,10 +267,33 @@ final class AudioRecorder {
         Self.logger.info("Reinstalling tap with new format: \(newInputFormat.sampleRate)Hz, \(newInputFormat.channelCount)ch")
         installTap(on: inputNode, inputFormat: newInputFormat, targetFormat: targetFormat, converter: newConverter, file: file)
 
+        // Temporarily remove observer before engine restart to prevent
+        // restart→notification→restart loop that starves the main run loop.
+        if let observer = configObserver {
+            NotificationCenter.default.removeObserver(observer)
+            configObserver = nil
+        }
+
         do {
             try engine.start()
         } catch {
             Self.logger.error("Failed to restart engine after config change: \(error.localizedDescription)")
+            // Engine is dead — clean up and report failure to AppState
+            let message = "Audio device changed and recording failed to recover."
+            forceReset()
+            onRecordingFailed?(message)
+            return
+        }
+
+        // Re-register observer after successful restart
+        configObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange,
+            object: engine,
+            queue: nil
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.handleConfigurationChange(targetFormat: targetFormat)
+            }
         }
     }
 
@@ -265,6 +313,9 @@ final class AudioRecorder {
 
         durationTimer?.invalidate()
         durationTimer = nil
+
+        noAudioWatchdog?.invalidate()
+        noAudioWatchdog = nil
 
         // Compute final duration from monotonic clock for accuracy (timer is up to 100ms stale)
         let duration: TimeInterval
@@ -286,6 +337,54 @@ final class AudioRecorder {
         Self.logger.info("Recording stopped: \(frames) frames written, \(dropped) frames dropped, \(String(format: "%.1f", duration))s duration")
 
         return (url, duration, frames)
+    }
+
+    /// Unconditionally resets all recording state. Use when the recorder is stuck
+    /// in a bad state (engine dead, config change loop, etc.) and normal stopRecording()
+    /// can't recover. Does NOT return the recording — the audio is lost.
+    func forceReset() {
+        Self.logger.warning("Force-resetting audio recorder — cleaning up all state")
+        _isCapturing.withLock { $0 = false }
+
+        if let observer = configObserver {
+            NotificationCenter.default.removeObserver(observer)
+            configObserver = nil
+        }
+
+        durationTimer?.invalidate()
+        durationTimer = nil
+
+        noAudioWatchdog?.invalidate()
+        noAudioWatchdog = nil
+
+        if let engine = audioEngine {
+            engine.inputNode.removeTap(onBus: 0)
+            engine.stop()
+        }
+        audioEngine = nil
+        outputFile = nil
+        recordingStartTime = nil
+        isRecording = false
+        recordingDuration = 0
+
+        // Clean up temp file — audio is lost anyway
+        if let url = outputURL {
+            try? FileManager.default.removeItem(at: url)
+            outputURL = nil
+        }
+    }
+
+    private func checkNoAudioWatchdog() {
+        guard isRecording else { return }
+        let frames = _framesWritten.withLock { $0 }
+        if frames < 800 {
+            Self.logger.error("Watchdog: recording for 5s with only \(frames) frames — auto-stopping")
+            let message = "No audio captured after 5 seconds. Check your microphone or try reconnecting your headphones."
+            forceReset()
+            onRecordingFailed?(message)
+        } else {
+            Self.logger.info("Watchdog: \(frames) frames captured — recording healthy")
+        }
     }
 }
 

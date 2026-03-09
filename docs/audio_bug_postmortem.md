@@ -1,6 +1,6 @@
 # Audio Bug Postmortem: Bluetooth Headphone Recording Failure
 
-**Status:** RESOLVED in v1.3 (2026-03-09)
+**Status:** RESOLVED in v1.3, follow-up fix in v1.4 (2026-03-09)
 **Files:** `Sources/DICTATR/AudioRecorder.swift`, `Sources/DICTATR/AppState.swift`
 
 ---
@@ -126,6 +126,66 @@ The first ~100-300ms of audio during a Bluetooth codec switch. This is acceptabl
 
 ---
 
+## Follow-up Bug (v1.4): App Freezes After WhatsApp/FaceTime Call
+
+### Symptom
+
+After a WhatsApp call (or any app that uses the microphone) ends, DICTATR's recording gets stuck. The user presses F5, sees the recording indicator at `0:00 / 5:00`, but the timer doesn't advance and pressing F5 again does nothing. The only escape is force-quitting the app.
+
+### Root cause: Config change → restart → config change infinite loop
+
+When another app (WhatsApp, FaceTime, Zoom) releases the microphone, macOS reconfigures the audio route. If DICTATR starts recording during this transition:
+
+1. `sampleRate == 0` at start → engine starts without tap (correct, from v1.3 fix)
+2. `AVAudioEngineConfigurationChange` fires → `handleConfigurationChange()` runs
+3. Handler reinstalls tap and calls `engine.start()`
+4. `engine.start()` triggers *another* config change notification (the engine restart causes a new route negotiation)
+5. New notification → handler runs again → restart → notification → **infinite loop**
+
+Each iteration goes through `Task { @MainActor }`, so it's not a stack overflow — but the main run loop is saturated processing config change handlers back-to-back. The F5 hotkey handler is queued but never gets to execute. The timer callback is also starved, so the indicator stays at `0:00`.
+
+### Secondary issue: Zombie recording on engine failure
+
+Even without the loop, if `engine.start()` fails in the config change handler, the error was logged but `isRecording` stayed `true`. The app showed "Recording..." forever with a dead engine and no way to recover.
+
+### The fix (v1.4)
+
+**1. Break the restart→notification→restart loop**
+
+Two mechanisms:
+- **Observer pause**: Remove the `configurationChangeNotification` observer before calling `engine.start()` in the handler, re-register after success. This means any notification triggered by the restart itself is not caught.
+- **Debounce**: Notification-driven calls are gated to 300ms minimum interval. Even if the observer removal doesn't fully prevent the loop, rapid-fire notifications are dropped. Self-initiated retries (200ms delay for invalid format) skip the debounce.
+
+**2. Stop recording on engine failure**
+
+If `engine.start()` fails in the config change handler, `forceReset()` is called instead of silently logging. This cleans up all state (engine, tap, file, timers) and notifies AppState via `onRecordingFailed` callback, which resets the UI to idle.
+
+**3. No-audio watchdog timer**
+
+A one-shot 5-second timer starts with each recording. If `framesWritten < 800` after 5 seconds, the recording is auto-stopped and the user sees "No audio captured after 5 seconds. Check your microphone or try reconnecting your headphones." This catches cases where:
+- The config change notification never fires (no recovery possible)
+- The config change loop was broken by debounce but no tap was ever installed
+- The audio device is genuinely unavailable
+
+**4. `forceReset()` method**
+
+Unconditionally tears down all recording state: atomic flags, observer, timers, engine, tap, temp file. Used by the watchdog, the engine-failure path, and AppState's nil-stop fallback. Unlike `stopRecording()` which has guards and returns a result, `forceReset()` always succeeds.
+
+**5. AppState recovery**
+
+When `stopRecording()` returns nil (recorder in unexpected state), AppState now calls `forceReset()` to ensure full cleanup instead of just resetting UI state.
+
+### Updated behavior matrix
+
+| Scenario | v1.3 | v1.4 |
+|---|---|---|
+| Post-WhatsApp-call, config change loop | App freezes, F5 unresponsive | Loop broken by observer pause + debounce, F5 works |
+| Engine dies in config handler | Zombie recording, stuck UI | `forceReset()` → UI shows error message |
+| No config change ever fires | User must manually stop, gets "No audio captured" | Watchdog auto-stops after 5s with clear error |
+| Normal recording | Works | Works (watchdog passes silently) |
+
+---
+
 ## Debugging Future Audio Issues
 
 ### Console.app
@@ -169,7 +229,11 @@ Filter by subsystem `com.dictatr` to see the full recording lifecycle:
 | `Engine started (tapInstalled=false)` | Deferred tap path taken. If NOT followed by "Reinstalling tap", the config change never fired -- audio will be empty. |
 | `Format still invalid after config change` | Transitional state. Should retry up to 3 times. If all 3 fail, audio will be empty. |
 | `Audio frame dropped (N total)` | Tap is running but producing unconvertible frames. If this count is very high and framesWritten is very low, the converter or format is wrong. |
-| `stopRecording() returned nil` | `stopRecording()` was called but `isRecording` was false. Should not happen after v1.3 fix since state is synchronous. If this appears, there's a new state management bug. |
+| `stopRecording() returned nil` | `stopRecording()` was called but `isRecording` was false. `forceReset()` is called as fallback. |
+| `Config change debounced` | A config change notification was dropped because it fired too soon after the previous one. This is the loop-prevention mechanism working correctly. |
+| `Force-resetting audio recorder` | `forceReset()` was called — either by watchdog, engine failure, or AppState fallback. All recording state is torn down. |
+| `Watchdog: recording for 5s with only N frames` | No audio was captured after 5 seconds. Recording was auto-stopped. Check microphone availability. |
+| `Recording auto-stopped` | AppState received an `onRecordingFailed` callback. The error message tells you why. |
 
 ---
 
@@ -186,6 +250,12 @@ Filter by subsystem `com.dictatr` to see the full recording lifecycle:
 5. **`try?` on I/O operations hides real problems.** Always use `do/catch` with logging. The original `try? outFile.write()` masked every write failure.
 
 6. **Starting the engine triggers the codec switch.** The engine doesn't need a tap to run. Starting it without a tap is valid and useful -- it triggers the hardware state change that makes the tap possible.
+
+7. **`engine.start()` can trigger `configurationChangeNotification`.** If you handle the notification by restarting the engine, you get an infinite loop that starves the main run loop. Always remove the observer before restarting, and debounce notification-driven calls.
+
+8. **Audio route changes from other apps (WhatsApp, FaceTime, Zoom) cause the same sampleRate=0 state as Bluetooth codec switches.** The recovery mechanism must handle both initial Bluetooth pairing AND post-call audio route reconfiguration.
+
+9. **Silent engine death requires active detection.** If `engine.start()` fails in a notification handler, the error is easily swallowed. Always have a fallback: either propagate the error to the UI, or use a watchdog timer to detect the failure.
 
 ---
 

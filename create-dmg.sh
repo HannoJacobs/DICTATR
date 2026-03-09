@@ -54,9 +54,9 @@ cat > "$BUILD_DIR/$APP_BUNDLE/Contents/Info.plist" << 'PLIST'
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleVersion</key>
-    <string>1.3</string>
+    <string>1.4</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.3</string>
+    <string>1.4</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>DICTATR needs microphone access to record your dictation.</string>
     <key>LSUIElement</key>
