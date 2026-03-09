@@ -199,6 +199,15 @@ final class AppState {
             return
         }
 
+        // Detect hardware/driver issues where recording ran but no audio was captured
+        if result.framesWritten < 800 { // ~50ms at 16kHz
+            recordingIndicator.hide()
+            statusMessage = "No audio captured. Check your microphone."
+            currentState = .idle
+            try? FileManager.default.removeItem(at: result.url)
+            return
+        }
+
         recordingIndicator.showProcessing()
         currentState = .transcribing
         statusMessage = "Transcribing..."
