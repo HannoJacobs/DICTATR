@@ -167,15 +167,20 @@ final class AppState {
             return
         }
 
-        do {
-            _ = try audioRecorder.startRecording()
-            NSSound(named: .init("Tink"))?.play()
-            currentState = .recording
-            statusMessage = "Recording..."
-            errorMessage = nil
-            recordingIndicator.show(audioRecorder: audioRecorder)
-        } catch {
-            errorMessage = "Failed to start recording: \(error.localizedDescription)"
+        currentState = .recording
+        statusMessage = "Recording..."
+        errorMessage = nil
+
+        Task {
+            do {
+                _ = try await audioRecorder.startRecording()
+                NSSound(named: .init("Tink"))?.play()
+                recordingIndicator.show(audioRecorder: audioRecorder)
+            } catch {
+                currentState = .idle
+                statusMessage = "Ready"
+                errorMessage = "Failed to start recording: \(error.localizedDescription)"
+            }
         }
     }
 

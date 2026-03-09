@@ -45,7 +45,7 @@ final class AudioRecorder {
     private let _framesWritten = OSAllocatedUnfairLock(initialState: Int64(0))
     private let _droppedFrames = OSAllocatedUnfairLock(initialState: Int64(0))
 
-    func startRecording() throws -> URL {
+    func startRecording() async throws -> URL {
         // Guard against double-start — clean up any existing session first
         if isRecording {
             if let result = stopRecording() {
@@ -59,10 +59,24 @@ final class AudioRecorder {
 
         let engine = AVAudioEngine()
         let inputNode = engine.inputNode
-        let inputFormat = inputNode.outputFormat(forBus: 0)
+        var inputFormat = inputNode.outputFormat(forBus: 0)
+
+        // Bluetooth devices (AirPods, etc.) switch from AAC to HFP codec when the mic
+        // activates, which briefly reports sampleRate=0. Retry a few times to let it settle.
+        if inputFormat.sampleRate == 0 || inputFormat.channelCount == 0 {
+            Self.logger.info("Input format not ready (sampleRate=\(inputFormat.sampleRate)), waiting for Bluetooth codec switch...")
+            for attempt in 1...3 {
+                try await Task.sleep(for: .milliseconds(300))
+                inputFormat = inputNode.outputFormat(forBus: 0)
+                if inputFormat.sampleRate > 0, inputFormat.channelCount > 0 {
+                    Self.logger.info("Input format ready after \(attempt) retries")
+                    break
+                }
+            }
+        }
 
         guard inputFormat.sampleRate > 0, inputFormat.channelCount > 0 else {
-            Self.logger.error("Invalid input format: sampleRate=\(inputFormat.sampleRate), channels=\(inputFormat.channelCount)")
+            Self.logger.error("Invalid input format after retries: sampleRate=\(inputFormat.sampleRate), channels=\(inputFormat.channelCount)")
             throw AudioRecorderError.invalidInputFormat
         }
         Self.logger.info("Recording with input format: \(inputFormat.sampleRate)Hz, \(inputFormat.channelCount)ch")
