@@ -45,7 +45,7 @@ final class TranscriptionEngine {
 
         isLoading = true
         downloadProgress = 0
-        loadingPhase = "Downloading model..."
+        loadingPhase = "Loading model..."
 
         do {
             // Use WhisperKit's recommended model for this device

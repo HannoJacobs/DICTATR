@@ -136,7 +136,7 @@ final class AppState {
         modelLoadTask = Task { [weak self] in
             guard let self else { return }
             do {
-                self.statusMessage = "Downloading model..."
+                self.statusMessage = "Loading model..."
                 try await self.transcriptionEngine.loadModel()
                 if Task.isCancelled { return }
                 self.statusMessage = "Ready"
