@@ -242,7 +242,7 @@ final class AppState {
                 let pasteResult = await PasteManager.paste(text: text, autoPaste: self.autoPasteEnabled)
 
                 if pasteResult == .noAccessibility {
-                    self.errorMessage = "Enable Accessibility: Settings → Privacy & Security → Accessibility"
+                    self.errorMessage = "Settings → search \"Privacy\" → Accessibility → toggle DICTATR on"
                 }
 
                 // Save to database — don't let DB failure undo the transcription
