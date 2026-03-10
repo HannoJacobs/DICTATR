@@ -134,13 +134,8 @@ final class AppState {
         audioRecorder.onRecordingStable = { [weak self] in
             guard let self else { return }
             if self.autoRetryCount > 0 {
-                Self.logger.info("Recording stable — resetting retry counter (was \(self.autoRetryCount))")
+                Self.logger.info("Recording stable — resetting retry counter")
                 self.autoRetryCount = 0
-            }
-            // Clear built-in mic override once recording is stable.
-            // Next session will try the default device (AirPods) first.
-            if self.audioRecorder.useBuiltInMic {
-                Self.logger.info("Recording stable on built-in mic — will try default device next session")
             }
         }
 
@@ -212,65 +207,65 @@ final class AppState {
         }
     }
 
-    // Phase 1: fast retries with escalating delays (for transient Bluetooth glitches)
-    // Phase 2: slow retries every 15s indefinitely (for longer Bluetooth recovery)
-    // Never gives up — keeps trying until it works or the user presses the hotkey.
-    private static let fastRetryDelays: [Double] = [1.5, 2.5, 3.5, 4.0]
-    private static let slowRetryInterval: Double = 15.0
-
+    // Recovery strategy: try default device once more after 1s, then immediately
+    // fall back to built-in mic. Only changes the input - audio output stays on
+    // headphones so music/YouTube keeps playing through them.
     private func handleRecordingFailure(message: String) {
         Self.logger.error("Recording auto-stopped: \(message)")
-        scheduleRetry()
-    }
-
-    private func scheduleRetry() {
         autoRetryCount += 1
-        let delay: Double
-        if autoRetryCount <= Self.fastRetryDelays.count {
-            delay = Self.fastRetryDelays[autoRetryCount - 1]
-            Self.logger.info("Fast retry \(self.autoRetryCount)/\(Self.fastRetryDelays.count) in \(delay)s...")
-        } else {
-            delay = Self.slowRetryInterval
-            // After fast retries exhaust, fall back to built-in mic.
-            // Bluetooth is likely stuck at the OS level and retrying with
-            // the same broken device will never work.
-            if !audioRecorder.useBuiltInMic {
-                audioRecorder.useBuiltInMic = true
-                Self.logger.info("Switching to built-in mic fallback")
+
+        if autoRetryCount == 1 {
+            // First failure: quick retry with same device (handles brief glitches)
+            Self.logger.info("Quick retry in 1s with default device...")
+            currentState = .idle
+            statusMessage = "Reconnecting..."
+            recordingIndicator.showReconnecting()
+
+            autoRetryTask?.cancel()
+            autoRetryTask = Task {
+                try? await Task.sleep(for: .seconds(1.0))
+                guard !Task.isCancelled, self.currentState == .idle else { return }
+                self.retryStartRecording()
             }
-            Self.logger.info("Slow retry (attempt \(self.autoRetryCount)) in \(delay)s with built-in mic...")
-        }
+        } else {
+            // Second failure: default device is broken, fall back to built-in mic
+            Self.logger.info("Default device failed twice — falling back to built-in mic")
+            audioRecorder.useBuiltInMic = true
+            currentState = .idle
+            statusMessage = "Using MacBook mic..."
+            recordingIndicator.showReconnecting()
 
-        currentState = .idle
-        statusMessage = audioRecorder.useBuiltInMic ? "Using built-in mic..." : "Reconnecting..."
-        recordingIndicator.showReconnecting()
-
-        autoRetryTask?.cancel()
-        autoRetryTask = Task {
-            try? await Task.sleep(for: .seconds(delay))
-            guard !Task.isCancelled, self.currentState == .idle else { return }
-            self.retryStartRecording()
+            autoRetryTask?.cancel()
+            autoRetryTask = Task {
+                try? await Task.sleep(for: .seconds(0.5))
+                guard !Task.isCancelled, self.currentState == .idle else { return }
+                self.retryStartRecording()
+            }
         }
     }
 
-    /// Like startRecording() but feeds failures back into the retry loop
-    /// instead of showing an error and giving up.
     private func retryStartRecording() {
-        guard transcriptionEngine.isModelLoaded else {
-            scheduleRetry()
-            return
-        }
+        guard transcriptionEngine.isModelLoaded else { return }
 
         do {
             let url = try audioRecorder.startRecording()
             currentState = .recording
-            statusMessage = "Recording..."
+            statusMessage = audioRecorder.useBuiltInMic ? "Recording (MacBook mic)..." : "Recording..."
             errorMessage = nil
             recordingIndicator.show(audioRecorder: audioRecorder)
-            Self.logger.info("Retry succeeded — recording resumed → \(url.lastPathComponent)")
+            Self.logger.info("Retry succeeded → \(url.lastPathComponent) (builtInMic=\(self.audioRecorder.useBuiltInMic))")
         } catch {
-            Self.logger.error("Retry failed to start: \(error.localizedDescription)")
-            scheduleRetry()
+            Self.logger.error("Retry failed: \(error.localizedDescription)")
+            if !audioRecorder.useBuiltInMic {
+                // First retry with default device failed to even start — go straight to built-in
+                handleRecordingFailure(message: error.localizedDescription)
+            } else {
+                // Even built-in mic failed — give up
+                currentState = .idle
+                statusMessage = "Recording failed"
+                errorMessage = "Could not access any microphone."
+                recordingIndicator.hide()
+            }
         }
     }
 
