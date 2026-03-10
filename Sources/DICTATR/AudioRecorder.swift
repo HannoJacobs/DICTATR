@@ -37,9 +37,6 @@ final class AudioRecorder {
     private var recordingStartTime: TimeInterval?
     private var durationTimer: Timer?
     private var configObserver: NSObjectProtocol?
-    private var configChangeRetries = 0
-    private static let maxConfigChangeRetries = 3
-    private var lastConfigChangeTime: TimeInterval = 0
     private var noAudioWatchdog: Timer?
     var onRecordingFailed: ((String) -> Void)?
 
@@ -100,9 +97,6 @@ final class AudioRecorder {
         self._isCapturing.withLock { $0 = true }
         self._framesWritten.withLock { $0 = 0 }
         self._droppedFrames.withLock { $0 = 0 }
-        self.configChangeRetries = 0
-        self.lastConfigChangeTime = 0
-
         // Only install the tap if the input format is valid. When sampleRate is 0
         // (Bluetooth codec switch in progress), skip the tap — the config change
         // handler will install it once the format becomes valid.
@@ -136,14 +130,15 @@ final class AudioRecorder {
         self.recordingDuration = 0
         self.recordingStartTime = ProcessInfo.processInfo.systemUptime
 
-        // Observe audio configuration changes (device connect/disconnect, Bluetooth profile switch)
+        // Observe audio configuration changes (device connect/disconnect, Bluetooth profile switch).
+        // On any config change, we tear down and let AppState auto-retry with a fresh engine.
         configObserver = NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange,
             object: engine,
             queue: nil
         ) { [weak self] _ in
             Task { @MainActor in
-                self?.handleConfigurationChange(targetFormat: targetFormat)
+                self?.handleConfigurationChange()
             }
         }
 
@@ -219,82 +214,16 @@ final class AudioRecorder {
         }
     }
 
-    private func handleConfigurationChange(targetFormat: AVAudioFormat, isRetry: Bool = false) {
-        guard isRecording, let engine = audioEngine, let file = outputFile else { return }
-
-        // Debounce notification-driven calls to prevent restart→notification→restart loops.
-        // When engine.start() triggers a config change, the notification fires before the
-        // main run loop processes other events (like F5), starving the UI. This 300ms gate
-        // breaks the cycle. Self-initiated retries skip the debounce.
-        if !isRetry {
-            let now = ProcessInfo.processInfo.systemUptime
-            guard now - lastConfigChangeTime > 0.3 else {
-                Self.logger.info("Config change debounced (fired \(String(format: "%.0f", (now - self.lastConfigChangeTime) * 1000))ms after previous)")
-                return
-            }
-            lastConfigChangeTime = now
-        }
-
-        Self.logger.info("Audio configuration changed during recording — reinstalling tap")
-
-        let inputNode = engine.inputNode
-        inputNode.removeTap(onBus: 0)
-
-        let newInputFormat = inputNode.outputFormat(forBus: 0)
-
-        guard newInputFormat.sampleRate > 0, newInputFormat.channelCount > 0 else {
-            // Format still invalid (transitional state during Bluetooth codec switch).
-            // Schedule a delayed retry — the format usually settles within a few hundred ms.
-            configChangeRetries += 1
-            if configChangeRetries <= Self.maxConfigChangeRetries {
-                Self.logger.warning("Format still invalid after config change (attempt \(self.configChangeRetries)/\(Self.maxConfigChangeRetries)), retrying in 200ms...")
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
-                    self?.handleConfigurationChange(targetFormat: targetFormat, isRetry: true)
-                }
-            } else {
-                Self.logger.warning("Format still invalid after \(Self.maxConfigChangeRetries) retries: sampleRate=\(newInputFormat.sampleRate), channels=\(newInputFormat.channelCount). Giving up — frame count check will catch this at stop.")
-            }
-            return
-        }
-
-        configChangeRetries = 0
-
-        guard let newConverter = AVAudioConverter(from: newInputFormat, to: targetFormat) else {
-            Self.logger.error("Failed to create converter for new input format after config change")
-            return
-        }
-
-        Self.logger.info("Reinstalling tap with new format: \(newInputFormat.sampleRate)Hz, \(newInputFormat.channelCount)ch")
-        installTap(on: inputNode, inputFormat: newInputFormat, targetFormat: targetFormat, converter: newConverter, file: file)
-
-        // Temporarily remove observer before engine restart to prevent
-        // restart→notification→restart loop that starves the main run loop.
-        if let observer = configObserver {
-            NotificationCenter.default.removeObserver(observer)
-            configObserver = nil
-        }
-
-        do {
-            try engine.start()
-        } catch {
-            Self.logger.error("Failed to restart engine after config change: \(error.localizedDescription)")
-            // Engine is dead — clean up and report failure to AppState
-            let message = "Audio device changed and recording failed to recover."
-            forceReset()
-            onRecordingFailed?(message)
-            return
-        }
-
-        // Re-register observer after successful restart
-        configObserver = NotificationCenter.default.addObserver(
-            forName: .AVAudioEngineConfigurationChange,
-            object: engine,
-            queue: nil
-        ) { [weak self] _ in
-            Task { @MainActor in
-                self?.handleConfigurationChange(targetFormat: targetFormat)
-            }
-        }
+    /// Audio config changed (Bluetooth profile switch, device disconnect, etc.).
+    /// Instead of complex in-place recovery (which can block the main thread and hang
+    /// the app), we simply tear everything down and let AppState auto-retry with a
+    /// fresh engine. The user loses at most 1-2 seconds of audio (which was likely
+    /// silence/noise during the hardware transition anyway).
+    private func handleConfigurationChange() {
+        guard isRecording else { return }
+        Self.logger.warning("Audio configuration changed during recording — tearing down for fresh start")
+        forceReset()
+        onRecordingFailed?("Audio device changed. Reconnecting...")
     }
 
     func stopRecording() -> (url: URL, duration: TimeInterval, framesWritten: Int64)? {

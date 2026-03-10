@@ -161,6 +161,15 @@ struct MenuBarView: View {
                     Text(error)
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    Spacer()
+                    if appState.currentState == .idle {
+                        Button("Try Again") {
+                            appState.errorMessage = nil
+                            appState.toggleRecording()
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.mini)
+                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.bottom, 4)

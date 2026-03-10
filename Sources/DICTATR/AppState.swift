@@ -86,6 +86,8 @@ final class AppState {
     private var hotkeyManager: HotkeyManager?
     private var modelLoadTask: Task<Void, Never>?
     private var transcriptionTask: Task<Void, Never>?
+    private var autoRetryTask: Task<Void, Never>?
+    private var autoRetryCount = 0
     private let recordingIndicator = RecordingIndicatorPanel()
 
     var menuBarIcon: String {
@@ -160,6 +162,8 @@ final class AppState {
     func toggleRecording() {
         switch currentState {
         case .idle:
+            autoRetryCount = 0
+            autoRetryTask?.cancel()
             startRecording()
         case .recording:
             stopRecordingAndTranscribe()
@@ -193,10 +197,29 @@ final class AppState {
 
     private func handleRecordingFailure(message: String) {
         Self.logger.error("Recording auto-stopped: \(message)")
-        recordingIndicator.hide()
-        currentState = .idle
-        statusMessage = "Recording failed"
-        errorMessage = message
+
+        // Auto-retry once for transient failures (Bluetooth profile switches, device changes).
+        // Shows "Reconnecting..." in the indicator panel, waits for hardware to settle,
+        // then starts a fresh recording. If the retry also fails, shows the error for good.
+        autoRetryCount += 1
+        if autoRetryCount <= 1 {
+            Self.logger.info("Auto-retrying recording (attempt \(autoRetryCount))...")
+            currentState = .idle
+            statusMessage = "Reconnecting..."
+            recordingIndicator.showReconnecting()
+
+            autoRetryTask?.cancel()
+            autoRetryTask = Task {
+                try? await Task.sleep(for: .seconds(1.5))
+                guard !Task.isCancelled, currentState == .idle else { return }
+                startRecording()
+            }
+        } else {
+            recordingIndicator.hide()
+            currentState = .idle
+            statusMessage = "Recording failed"
+            errorMessage = message
+        }
     }
 
     private func stopRecordingAndTranscribe() {

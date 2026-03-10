@@ -51,6 +51,12 @@ final class RecordingIndicatorPanel {
         self.panel = p
     }
 
+    func showReconnecting() {
+        autoDismissTask?.cancel()
+        state.phase = .reconnecting
+        // If panel isn't showing yet, nothing to do — AppState will call show() on retry
+    }
+
     func showProcessing() {
         autoDismissTask?.cancel()
         state.phase = .processing
@@ -83,7 +89,7 @@ final class RecordingIndicatorPanel {
 // MARK: - State
 
 enum IndicatorPhase {
-    case idle, recording, processing, done
+    case idle, recording, reconnecting, processing, done
 }
 
 @Observable
@@ -118,6 +124,15 @@ private struct RecordingIndicatorView: View {
                     Text("\(formatDuration(state.audioRecorder?.recordingDuration ?? 0)) / 5:00")
                         .font(.system(size: 14, weight: .medium, design: .monospaced))
                         .foregroundStyle(.white)
+
+                case .reconnecting:
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(.cyan)
+
+                    Text("Reconnecting...")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.cyan)
 
                 case .processing:
                     ProgressView()
