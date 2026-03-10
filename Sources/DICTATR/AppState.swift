@@ -203,7 +203,7 @@ final class AppState {
         // then starts a fresh recording. If the retry also fails, shows the error for good.
         autoRetryCount += 1
         if autoRetryCount <= 1 {
-            Self.logger.info("Auto-retrying recording (attempt \(autoRetryCount))...")
+            Self.logger.info("Auto-retrying recording (attempt \(self.autoRetryCount))...")
             currentState = .idle
             statusMessage = "Reconnecting..."
             recordingIndicator.showReconnecting()
