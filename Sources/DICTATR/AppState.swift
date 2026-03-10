@@ -195,24 +195,27 @@ final class AppState {
         }
     }
 
+    private static let maxAutoRetries = 4
+    private static let retryDelays: [Double] = [1.5, 2.5, 3.5, 4.0]
+
     private func handleRecordingFailure(message: String) {
         Self.logger.error("Recording auto-stopped: \(message)")
 
-        // Auto-retry once for transient failures (Bluetooth profile switches, device changes).
-        // Shows "Reconnecting..." in the indicator panel, waits for hardware to settle,
-        // then starts a fresh recording. If the retry also fails, shows the error for good.
+        // Auto-retry with escalating delays for Bluetooth profile switches, which can
+        // take 5-10+ seconds to settle after a call. Each retry creates a fresh engine.
         autoRetryCount += 1
-        if autoRetryCount <= 1 {
-            Self.logger.info("Auto-retrying recording (attempt \(self.autoRetryCount))...")
+        if autoRetryCount <= Self.maxAutoRetries {
+            let delay = Self.retryDelays[min(autoRetryCount - 1, Self.retryDelays.count - 1)]
+            Self.logger.info("Auto-retrying recording (attempt \(self.autoRetryCount)/\(Self.maxAutoRetries), delay \(delay)s)...")
             currentState = .idle
             statusMessage = "Reconnecting..."
             recordingIndicator.showReconnecting()
 
             autoRetryTask?.cancel()
             autoRetryTask = Task {
-                try? await Task.sleep(for: .seconds(1.5))
+                try? await Task.sleep(for: .seconds(delay))
                 guard !Task.isCancelled, currentState == .idle else { return }
-                startRecording()
+                self.startRecording()
             }
         } else {
             recordingIndicator.hide()
