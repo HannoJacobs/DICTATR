@@ -206,33 +206,58 @@ final class AppState {
         }
     }
 
-    private static let maxAutoRetries = 4
-    private static let retryDelays: [Double] = [1.5, 2.5, 3.5, 4.0]
+    // Phase 1: fast retries with escalating delays (for transient Bluetooth glitches)
+    // Phase 2: slow retries every 15s indefinitely (for longer Bluetooth recovery)
+    // Never gives up — keeps trying until it works or the user presses the hotkey.
+    private static let fastRetryDelays: [Double] = [1.5, 2.5, 3.5, 4.0]
+    private static let slowRetryInterval: Double = 15.0
 
     private func handleRecordingFailure(message: String) {
         Self.logger.error("Recording auto-stopped: \(message)")
+        scheduleRetry()
+    }
 
-        // Auto-retry with escalating delays for Bluetooth profile switches, which can
-        // take 5-10+ seconds to settle after a call. Each retry creates a fresh engine.
+    private func scheduleRetry() {
         autoRetryCount += 1
-        if autoRetryCount <= Self.maxAutoRetries {
-            let delay = Self.retryDelays[min(autoRetryCount - 1, Self.retryDelays.count - 1)]
-            Self.logger.info("Auto-retrying recording (attempt \(self.autoRetryCount)/\(Self.maxAutoRetries), delay \(delay)s)...")
-            currentState = .idle
-            statusMessage = "Reconnecting..."
-            recordingIndicator.showReconnecting()
-
-            autoRetryTask?.cancel()
-            autoRetryTask = Task {
-                try? await Task.sleep(for: .seconds(delay))
-                guard !Task.isCancelled, currentState == .idle else { return }
-                self.startRecording()
-            }
+        let delay: Double
+        if autoRetryCount <= Self.fastRetryDelays.count {
+            delay = Self.fastRetryDelays[autoRetryCount - 1]
+            Self.logger.info("Fast retry \(self.autoRetryCount)/\(Self.fastRetryDelays.count) in \(delay)s...")
         } else {
-            recordingIndicator.hide()
-            currentState = .idle
-            statusMessage = "Recording failed"
-            errorMessage = message
+            delay = Self.slowRetryInterval
+            Self.logger.info("Slow retry (attempt \(self.autoRetryCount)) in \(delay)s...")
+        }
+
+        currentState = .idle
+        statusMessage = "Reconnecting..."
+        recordingIndicator.showReconnecting()
+
+        autoRetryTask?.cancel()
+        autoRetryTask = Task {
+            try? await Task.sleep(for: .seconds(delay))
+            guard !Task.isCancelled, self.currentState == .idle else { return }
+            self.retryStartRecording()
+        }
+    }
+
+    /// Like startRecording() but feeds failures back into the retry loop
+    /// instead of showing an error and giving up.
+    private func retryStartRecording() {
+        guard transcriptionEngine.isModelLoaded else {
+            scheduleRetry()
+            return
+        }
+
+        do {
+            let url = try audioRecorder.startRecording()
+            currentState = .recording
+            statusMessage = "Recording..."
+            errorMessage = nil
+            recordingIndicator.show(audioRecorder: audioRecorder)
+            Self.logger.info("Retry succeeded — recording resumed → \(url.lastPathComponent)")
+        } catch {
+            Self.logger.error("Retry failed to start: \(error.localizedDescription)")
+            scheduleRetry()
         }
     }
 
