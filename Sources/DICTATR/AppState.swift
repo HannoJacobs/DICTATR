@@ -137,6 +137,11 @@ final class AppState {
                 Self.logger.info("Recording stable — resetting retry counter (was \(self.autoRetryCount))")
                 self.autoRetryCount = 0
             }
+            // Clear built-in mic override once recording is stable.
+            // Next session will try the default device (AirPods) first.
+            if self.audioRecorder.useBuiltInMic {
+                Self.logger.info("Recording stable on built-in mic — will try default device next session")
+            }
         }
 
         // Register hotkey — dispatch to MainActor since callback thread is unspecified
@@ -175,6 +180,7 @@ final class AppState {
         case .idle:
             autoRetryCount = 0
             autoRetryTask?.cancel()
+            audioRecorder.useBuiltInMic = false
             startRecording()
         case .recording:
             stopRecordingAndTranscribe()
@@ -225,11 +231,18 @@ final class AppState {
             Self.logger.info("Fast retry \(self.autoRetryCount)/\(Self.fastRetryDelays.count) in \(delay)s...")
         } else {
             delay = Self.slowRetryInterval
-            Self.logger.info("Slow retry (attempt \(self.autoRetryCount)) in \(delay)s...")
+            // After fast retries exhaust, fall back to built-in mic.
+            // Bluetooth is likely stuck at the OS level and retrying with
+            // the same broken device will never work.
+            if !audioRecorder.useBuiltInMic {
+                audioRecorder.useBuiltInMic = true
+                Self.logger.info("Switching to built-in mic fallback")
+            }
+            Self.logger.info("Slow retry (attempt \(self.autoRetryCount)) in \(delay)s with built-in mic...")
         }
 
         currentState = .idle
-        statusMessage = "Reconnecting..."
+        statusMessage = audioRecorder.useBuiltInMic ? "Using built-in mic..." : "Reconnecting..."
         recordingIndicator.showReconnecting()
 
         autoRetryTask?.cancel()
