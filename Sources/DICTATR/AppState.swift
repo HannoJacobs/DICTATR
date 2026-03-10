@@ -128,6 +128,17 @@ final class AppState {
             self?.handleRecordingFailure(message: message)
         }
 
+        // Reset retry counter once recording is confirmed stable (5s watchdog passed).
+        // This ensures long-running sessions get fresh retries for each new glitch,
+        // rather than exhausting the counter from a single burst of config changes.
+        audioRecorder.onRecordingStable = { [weak self] in
+            guard let self else { return }
+            if self.autoRetryCount > 0 {
+                Self.logger.info("Recording stable — resetting retry counter (was \(self.autoRetryCount))")
+                self.autoRetryCount = 0
+            }
+        }
+
         // Register hotkey — dispatch to MainActor since callback thread is unspecified
         hotkeyManager = HotkeyManager { [weak self] in
             Task { @MainActor in

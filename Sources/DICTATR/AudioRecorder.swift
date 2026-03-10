@@ -39,6 +39,7 @@ final class AudioRecorder {
     private var configObserver: NSObjectProtocol?
     private var noAudioWatchdog: Timer?
     var onRecordingFailed: ((String) -> Void)?
+    var onRecordingStable: (() -> Void)?
 
     // Thread-safe flags readable from the real-time audio thread.
     // @Observable's isRecording is not safe to read from the audio thread.
@@ -313,6 +314,7 @@ final class AudioRecorder {
             onRecordingFailed?(message)
         } else {
             Self.logger.info("Watchdog: \(frames) frames captured — recording healthy")
+            onRecordingStable?()
         }
     }
 }
