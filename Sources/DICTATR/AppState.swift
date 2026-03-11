@@ -210,9 +210,21 @@ final class AppState {
     // Recovery strategy: try default device once more after 1s, then immediately
     // fall back to built-in mic. Only changes the input - audio output stays on
     // headphones so music/YouTube keeps playing through them.
+    // Max 4 total attempts to prevent infinite retry loops (1 default + 1 built-in + 2 extra).
     private func handleRecordingFailure(message: String) {
         Self.logger.error("Recording auto-stopped: \(message)")
         autoRetryCount += 1
+
+        if autoRetryCount > 4 {
+            // Too many failures - stop retrying entirely
+            Self.logger.error("Exceeded max retries (\(self.autoRetryCount)) — giving up")
+            autoRetryTask?.cancel()
+            currentState = .idle
+            statusMessage = "Recording failed"
+            errorMessage = "Microphone unavailable. Try disconnecting and reconnecting your headphones."
+            recordingIndicator.hide()
+            return
+        }
 
         if autoRetryCount == 1 {
             // First failure: quick retry with same device (handles brief glitches)
@@ -228,8 +240,8 @@ final class AppState {
                 self.retryStartRecording()
             }
         } else {
-            // Second failure: default device is broken, fall back to built-in mic
-            Self.logger.info("Default device failed twice — falling back to built-in mic")
+            // Second+ failure: default device is broken, fall back to built-in mic
+            Self.logger.info("Default device failed \(self.autoRetryCount) times — falling back to built-in mic")
             audioRecorder.useBuiltInMic = true
             currentState = .idle
             statusMessage = "Using MacBook mic..."

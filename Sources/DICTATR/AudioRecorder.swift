@@ -70,10 +70,10 @@ final class AudioRecorder {
         let inputNode = engine.inputNode
 
         // If Bluetooth is stuck, override the engine's input to the built-in mic.
-        if useBuiltInMic, let builtInID = Self.findBuiltInMicDevice() {
+        if useBuiltInMic, let builtInID = Self.findBuiltInMicDevice(), let audioUnit = inputNode.audioUnit {
             var deviceID = builtInID
             let status = AudioUnitSetProperty(
-                inputNode.audioUnit!,
+                audioUnit,
                 kAudioOutputUnitProperty_CurrentDevice,
                 kAudioUnitScope_Global,
                 0,
@@ -85,6 +85,8 @@ final class AudioRecorder {
             } else {
                 Self.logger.warning("Failed to set built-in mic (status=\(status)) — using system default")
             }
+        } else if useBuiltInMic {
+            Self.logger.warning("Cannot override to built-in mic (audioUnit or device not available) — using system default")
         }
         let inputFormat = inputNode.outputFormat(forBus: 0)
 
@@ -241,10 +243,19 @@ final class AudioRecorder {
     /// Audio config changed (Bluetooth profile switch, device disconnect, etc.).
     /// Instead of complex in-place recovery (which can block the main thread and hang
     /// the app), we simply tear everything down and let AppState auto-retry with a
-    /// fresh engine. The user loses at most 1-2 seconds of audio (which was likely
-    /// silence/noise during the hardware transition anyway).
+    /// fresh engine. Debounced to prevent rapid-fire notifications (common with Bose
+    /// and other Bluetooth headphones) from causing cascading resets.
     private func handleConfigurationChange() {
         guard isRecording else { return }
+
+        // Debounce: if we already handled a config change, ignore further ones.
+        // The forceReset below sets isRecording=false, but the notification can
+        // arrive multiple times before the main-actor dispatch processes them all.
+        guard audioEngine != nil else {
+            Self.logger.info("Config change ignored — engine already torn down")
+            return
+        }
+
         Self.logger.warning("Audio configuration changed during recording — tearing down for fresh start")
         forceReset()
         onRecordingFailed?("Audio device changed. Reconnecting...")
@@ -281,8 +292,10 @@ final class AudioRecorder {
         let frames = _framesWritten.withLock { $0 }
         let dropped = _droppedFrames.withLock { $0 }
 
-        audioEngine?.inputNode.removeTap(onBus: 0)
-        audioEngine?.stop()
+        if let engine = audioEngine, engine.isRunning {
+            engine.inputNode.removeTap(onBus: 0)
+            engine.stop()
+        }
         audioEngine = nil
         outputFile = nil
         recordingStartTime = nil
@@ -310,7 +323,10 @@ final class AudioRecorder {
         noAudioWatchdog?.invalidate()
         noAudioWatchdog = nil
 
-        if let engine = audioEngine {
+        // Only tear down the engine if it's still running. Calling removeTap or
+        // accessing inputNode on a stopped/dead engine can trigger precondition
+        // failures (crash) when the underlying audio device has disappeared.
+        if let engine = audioEngine, engine.isRunning {
             engine.inputNode.removeTap(onBus: 0)
             engine.stop()
         }
