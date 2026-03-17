@@ -323,14 +323,30 @@ final class AudioRecorder {
         noAudioWatchdog?.invalidate()
         noAudioWatchdog = nil
 
-        // Only tear down the engine if it's still running. Calling removeTap or
-        // accessing inputNode on a stopped/dead engine can trigger precondition
-        // failures (crash) when the underlying audio device has disappeared.
-        if let engine = audioEngine, engine.isRunning {
-            engine.inputNode.removeTap(onBus: 0)
-            engine.stop()
+        // If the engine is still running, stop it cleanly (remove tap, then stop).
+        // If it was stopped by the system (AVAudioEngineConfigurationChange), do NOT
+        // access inputNode — the underlying HAL device may be in an inconsistent state.
+        //
+        // In both cases, delay actual ARC deallocation by holding a zombie reference for
+        // 200ms. Releasing the engine immediately after a system-initiated stop causes a
+        // use-after-free crash: CoreAudio's AVAudioIOUnit dispatch queue may have
+        // IOUnitPropertyListener blocks in-flight that hold unretained pointers to
+        // internal engine objects (ATDefaultDeviceAggregate). If those fire after we
+        // free the engine, the pointer authentication check fails → EXC_BAD_ACCESS.
+        if let engine = audioEngine {
+            if engine.isRunning {
+                engine.inputNode.removeTap(onBus: 0)
+                engine.stop()
+            }
+            let zombie = engine
+            audioEngine = nil
+            Task.detached {
+                try? await Task.sleep(for: .milliseconds(200))
+                _ = zombie  // Released here, after CoreAudio's internal queues have drained
+            }
+        } else {
+            audioEngine = nil
         }
-        audioEngine = nil
         outputFile = nil
         recordingStartTime = nil
         isRecording = false
