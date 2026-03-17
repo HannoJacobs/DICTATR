@@ -157,7 +157,9 @@ final class AudioRecorder {
         self.recordingStartTime = ProcessInfo.processInfo.systemUptime
 
         // Observe audio configuration changes (device connect/disconnect, Bluetooth profile switch).
-        // On any config change, we tear down and let AppState auto-retry with a fresh engine.
+        // Some route changes emit AVAudioEngineConfigurationChange even when the freshly started
+        // engine is still healthy. handleConfigurationChange() only tears down when the system
+        // actually stopped the engine; otherwise it lets recording continue.
         configObserver = NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange,
             object: engine,
@@ -241,24 +243,45 @@ final class AudioRecorder {
     }
 
     /// Audio config changed (Bluetooth profile switch, device disconnect, etc.).
-    /// Instead of complex in-place recovery (which can block the main thread and hang
-    /// the app), we simply tear everything down and let AppState auto-retry with a
-    /// fresh engine. Debounced to prevent rapid-fire notifications (common with Bose
-    /// and other Bluetooth headphones) from causing cascading resets.
+    /// Some devices emit this notification during startup/route settling without
+    /// actually stopping the engine. Only tear down when the engine is no longer
+    /// running; otherwise keep recording and let the watchdog catch true no-audio
+    /// failures.
     private func handleConfigurationChange() {
         guard isRecording else { return }
 
         // Debounce: if we already handled a config change, ignore further ones.
         // The forceReset below sets isRecording=false, but the notification can
         // arrive multiple times before the main-actor dispatch processes them all.
-        guard audioEngine != nil else {
+        guard let engine = audioEngine else {
             Self.logger.info("Config change ignored — engine already torn down")
             return
         }
 
-        Self.logger.warning("Audio configuration changed during recording — tearing down for fresh start")
+        guard !engine.isRunning else {
+            Self.logger.info("Config change received but engine is still running — ignoring transient route-settle notification")
+            return
+        }
+
+        Self.logger.warning("Audio configuration changed during recording and engine stopped — tearing down for fresh start")
         forceReset()
         onRecordingFailed?("Audio device changed. Reconnecting...")
+    }
+
+    /// Delay ARC deallocation after an engine stop/system stop. Releasing immediately can
+    /// crash if CoreAudio still has in-flight blocks on its internal dispatch queues.
+    private func releaseEngineWithZombieDelay(_ engine: AVAudioEngine?) {
+        guard let engine else {
+            audioEngine = nil
+            return
+        }
+
+        let zombie = engine
+        audioEngine = nil
+        Task.detached {
+            try? await Task.sleep(for: .milliseconds(200))
+            _ = zombie
+        }
     }
 
     func stopRecording() -> (url: URL, duration: TimeInterval, framesWritten: Int64)? {
@@ -292,11 +315,15 @@ final class AudioRecorder {
         let frames = _framesWritten.withLock { $0 }
         let dropped = _droppedFrames.withLock { $0 }
 
-        if let engine = audioEngine, engine.isRunning {
-            engine.inputNode.removeTap(onBus: 0)
-            engine.stop()
+        if let engine = audioEngine {
+            if engine.isRunning {
+                engine.inputNode.removeTap(onBus: 0)
+                engine.stop()
+            }
+            releaseEngineWithZombieDelay(engine)
+        } else {
+            audioEngine = nil
         }
-        audioEngine = nil
         outputFile = nil
         recordingStartTime = nil
 
@@ -327,23 +354,12 @@ final class AudioRecorder {
         // If it was stopped by the system (AVAudioEngineConfigurationChange), do NOT
         // access inputNode — the underlying HAL device may be in an inconsistent state.
         //
-        // In both cases, delay actual ARC deallocation by holding a zombie reference for
-        // 200ms. Releasing the engine immediately after a system-initiated stop causes a
-        // use-after-free crash: CoreAudio's AVAudioIOUnit dispatch queue may have
-        // IOUnitPropertyListener blocks in-flight that hold unretained pointers to
-        // internal engine objects (ATDefaultDeviceAggregate). If those fire after we
-        // free the engine, the pointer authentication check fails → EXC_BAD_ACCESS.
         if let engine = audioEngine {
             if engine.isRunning {
                 engine.inputNode.removeTap(onBus: 0)
                 engine.stop()
             }
-            let zombie = engine
-            audioEngine = nil
-            Task.detached {
-                try? await Task.sleep(for: .milliseconds(200))
-                _ = zombie  // Released here, after CoreAudio's internal queues have drained
-            }
+            releaseEngineWithZombieDelay(engine)
         } else {
             audioEngine = nil
         }

@@ -1,0 +1,57 @@
+---
+description: '"Full send" means full deployment — commit, release, push, website, and local app swap'
+alwaysApply: true
+---
+
+# "Full Send" Deployment Checklist
+
+When the user says **"full send"**, **"fully deploy"**, or **"deploy everything"**, execute ALL of the following steps in order. Nothing is done until all steps are complete.
+
+## Steps
+
+1. **Bump version** in `create-dmg.sh` — update both `CFBundleVersion` and `CFBundleShortVersionString` to the next version number.
+
+2. **Commit** all changes:
+   ```
+   git add <changed files>
+   git commit -m "vX.Y: <summary of changes>"
+   ```
+
+3. **Create GitHub release BEFORE pushing** (so CI can upload the DMG to it):
+   ```
+   gh release create vX.Y \
+     --title "vX.Y — <title>" \
+     --notes "<release notes>"
+   ```
+
+4. **Push to main** — triggers CI (`.github/workflows/release.yml`) which:
+   - Builds the Release binary via `xcodebuild`
+   - Runs `create-dmg.sh` to package the `.app`
+   - Uploads `DICTATR.dmg` to the new GitHub release
+   ```
+   git push
+   ```
+
+5. **Website updates automatically** — `docs/index.html` points to `releases/latest/download/DICTATR.dmg`. No manual action needed once CI completes.
+
+6. **Swap the locally running app** (run in parallel with CI):
+   ```bash
+   # Build
+   DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild \
+     -scheme DICTATR -configuration Release -destination 'platform=macOS' build
+
+   # Find binary
+   BINARY=$(find ~/Library/Developer/Xcode/DerivedData -path "*/Release/DICTATR" -type f | head -1)
+
+   # Kill, replace, relaunch
+   kill $(pgrep -x DICTATR)
+   cp "$BINARY" /Applications/DICTATR.app/Contents/MacOS/DICTATR
+   open /Applications/DICTATR.app
+   ```
+
+## Hosting
+
+| Asset | Host | URL |
+|---|---|---|
+| Landing page | GitHub Pages (`/docs` on `main`) | `https://hannojacobs.github.io/DICTATR/` |
+| DMG download | GitHub Releases | `https://github.com/HannoJacobs/DICTATR/releases/latest/download/DICTATR.dmg` |
