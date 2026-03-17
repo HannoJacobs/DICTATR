@@ -2,6 +2,7 @@
 
 **Status:** RESOLVED in v1.3, follow-up fix in v1.4 (2026-03-09)
 **Files:** `Sources/DICTATR/AudioRecorder.swift`, `Sources/DICTATR/AppState.swift`
+**See also:** `docs/audio_followup_postmortem.md` for the later `v1.8`-`v1.11` crash-fix and reconnect-loop history
 
 ---
 
