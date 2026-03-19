@@ -205,7 +205,7 @@
       Download for Mac
     </a>
 
-    <p class="sub">Free &amp; open source &nbsp;·&nbsp; v1.8 &nbsp;·&nbsp; ~5 MB</p>
+    <p class="sub">Free &amp; open source &nbsp;·&nbsp; <span id="release-version">v1.11</span> &nbsp;·&nbsp; ~5 MB</p>
 
     <div class="features">
       <div class="feature">
@@ -254,6 +254,9 @@
     fetch('https://api.github.com/repos/HannoJacobs/DICTATR/releases/latest')
       .then(r => r.json())
       .then(data => {
+        if (data.tag_name) {
+          document.getElementById('release-version').textContent = data.tag_name;
+        }
         const asset = data.assets.find(a => a.name === 'DICTATR.dmg');
         if (!asset) return;
         const d = new Date(asset.updated_at);
