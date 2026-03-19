@@ -150,6 +150,11 @@
       padding: 0.4rem 0;
     }
 
+    .install-steps li > span {
+      flex: 1;
+      min-width: 0;
+    }
+
     .install-steps li::before {
       content: counter(steps);
       background: #222;
@@ -233,12 +238,12 @@
     <div class="install-steps">
       <h2>Getting started</h2>
       <ol>
-        <li>Open the DMG and drag DICTATR to Applications</li>
-        <li>Open Terminal and run: <code style="background:#1a1a1a;padding:0.1em 0.4em;border-radius:4px;font-size:0.85em">xattr -cr /Applications/DICTATR.app</code></li>
-        <li>Open DICTATR from Applications</li>
-        <li>Grant Microphone access when prompted</li>
-        <li>Open System Settings, search <strong>"Privacy"</strong>, select Privacy &amp; Security → Accessibility, and toggle DICTATR on</li>
-        <li>Press F5 anywhere and start talking</li>
+        <li><span>Open the DMG and drag DICTATR to Applications</span></li>
+        <li><span>Open Terminal and run: <code style="background:#1a1a1a;padding:0.1em 0.4em;border-radius:4px;font-size:0.85em">xattr -cr /Applications/DICTATR.app</code></span></li>
+        <li><span>Open DICTATR from Applications</span></li>
+        <li><span>Grant Microphone access when prompted</span></li>
+        <li><span>Open System Settings, search <strong>"Privacy"</strong>, select Privacy &amp; Security → Accessibility, and toggle DICTATR on</span></li>
+        <li><span>Press F5 anywhere and start talking</span></li>
       </ol>
     </div>
 
