@@ -10,6 +10,7 @@ When the user says **"full send"**, **"fully deploy"**, or **"deploy everything"
 ## Steps
 
 1. **Bump version** in `create-dmg.sh` — update both `CFBundleVersion` and `CFBundleShortVersionString` to the next version number.
+   - This is **not dynamic**. The DMG bundle metadata comes from the hardcoded `Info.plist` block inside `create-dmg.sh`.
 
 2. **Commit** all changes:
    ```
@@ -32,7 +33,10 @@ When the user says **"full send"**, **"fully deploy"**, or **"deploy everything"
    git push
    ```
 
-5. **Website updates automatically** — `docs/index.html` points to `releases/latest/download/DICTATR.dmg`. No manual action needed once CI completes.
+5. **Website updates automatically**:
+   - The download URL is stable: `releases/latest/download/DICTATR.dmg`
+   - The visible website version label is now dynamic and is fetched from the latest GitHub release `tag_name`
+   - No manual website version bump is needed unless the page copy/layout itself changes
 
 6. **Swap the locally running app** (run in parallel with CI):
    ```bash
@@ -46,8 +50,18 @@ When the user says **"full send"**, **"fully deploy"**, or **"deploy everything"
    # Kill, replace, relaunch
    kill $(pgrep -x DICTATR)
    cp "$BINARY" /Applications/DICTATR.app/Contents/MacOS/DICTATR
+
+   # Keep local Finder/About version metadata in sync with the deployed binary
+   /usr/libexec/PlistBuddy -c "Set :CFBundleVersion X.Y" /Applications/DICTATR.app/Contents/Info.plist
+   /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString X.Y" /Applications/DICTATR.app/Contents/Info.plist
+
    open /Applications/DICTATR.app
    ```
+
+7. **Verify versions after deploy**:
+   - `gh release view vX.Y` should show the uploaded `DICTATR.dmg`
+   - `/Applications/DICTATR.app/Contents/Info.plist` should report the same version as the release
+   - `docs/index.html` should show the latest release version automatically once GitHub Pages redeploys
 
 ## Hosting
 

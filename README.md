@@ -82,9 +82,20 @@ DMG. The download button URL is stable — it never needs updating:
 https://github.com/HannoJacobs/DICTATR/releases/latest/download/DICTATR.dmg
 ```
 
+The website's visible version label is also dynamic now: `docs/index.html` fetches the
+latest GitHub release and displays its `tag_name`. No manual website version bump is needed
+for normal releases.
+
+Important: the **app bundle version is not dynamic**. The DMG/app metadata comes from the
+hardcoded `Info.plist` block inside `create-dmg.sh`, so `CFBundleVersion` and
+`CFBundleShortVersionString` must be updated manually for each release.
+
 **To ship a new version:**
 
 ```bash
+# 0. Bump version in create-dmg.sh
+#    Update CFBundleVersion and CFBundleShortVersionString
+
 # 1. Build Release in Xcode (Cmd+B with Release config)
 
 # 2. Package the DMG
@@ -96,7 +107,8 @@ gh release create v1.1 DICTATR.dmg \
   --notes "What changed in this version."
 ```
 
-That's it. The website download button automatically serves the new file. No other changes needed.
+That's it. The website download button automatically serves the new file, and the website
+version label follows the latest GitHub release automatically.
 
 **First-time GitHub Pages setup** (one-off, already done):
 1. Go to repo Settings → Pages
@@ -106,6 +118,19 @@ That's it. The website download button automatically serves the new file. No oth
 
 **To update the landing page**, edit `docs/index.html`, commit, and push. GitHub Pages
 redeploys automatically within ~30 seconds.
+
+### Local app version after manual binary swap
+
+If you replace `/Applications/DICTATR.app/Contents/MacOS/DICTATR` directly with a freshly
+built binary, the executable code updates but Finder/About may still show the old version
+from `/Applications/DICTATR.app/Contents/Info.plist`.
+
+To keep local version reporting aligned with the deployed build, also update:
+
+```bash
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion X.Y" /Applications/DICTATR.app/Contents/Info.plist
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString X.Y" /Applications/DICTATR.app/Contents/Info.plist
+```
 
 ---
 
