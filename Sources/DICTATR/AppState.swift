@@ -84,6 +84,7 @@ final class AppState {
     let databaseManager: DatabaseManager?
 
     private var hotkeyManager: HotkeyManager?
+    private var httpServer: LocalHTTPServer?
     private var modelLoadTask: Task<Void, Never>?
     private var transcriptionTask: Task<Void, Never>?
     private var autoRetryTask: Task<Void, Never>?
@@ -145,6 +146,24 @@ final class AppState {
                 self?.toggleRecording()
             }
         }
+
+        // Start local HTTP transcription server (localhost:9876).
+        // The closure checks isModelLoaded before transcribing — requests that arrive
+        // before the model is ready get a 500 "model not loaded" response.
+        httpServer = LocalHTTPServer { [weak self] url in
+            // Hop to MainActor to check model state and call transcribe().
+            // TranscriptionEngine is @MainActor-isolated; the actual WhisperKit work
+            // happens on a background thread internally.
+            let engine: TranscriptionEngine = try await MainActor.run {
+                guard let self else { throw TranscriptionError.modelNotLoaded }
+                guard self.transcriptionEngine.isModelLoaded else {
+                    throw TranscriptionError.modelNotLoaded
+                }
+                return self.transcriptionEngine
+            }
+            return try await engine.transcribe(audioURL: url)
+        }
+        httpServer?.start()
 
         // Start model download immediately so it's ready when user opens the menu.
         // If already cached, this completes in seconds.
