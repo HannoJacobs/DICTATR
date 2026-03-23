@@ -1,6 +1,6 @@
 # Audio Follow-up Postmortem: Crash Fixes and Reconnect Loop
 
-**Status:** Seems improved in `v1.11`, but should be treated as "working in current testing" rather than permanently resolved.
+**Status:** Seems improved in `v1.11`–`v1.12`, but should be treated as "working in current testing" rather than permanently resolved.
 **Files:** `Sources/DICTATR/AudioRecorder.swift`, `Sources/DICTATR/AppState.swift`, `create-dmg.sh`
 **Related doc:** `docs/audio_bug_postmortem.md`
 
@@ -164,6 +164,21 @@ then this may need another iteration.
 
 ---
 
+## `v1.12` - Retry coalescing and HFP-settle delays (`AppState`)
+
+### Edits made
+
+- Coalesce rapid `handleRecordingFailure` callbacks while a reconnect is already scheduled (Bluetooth HFP storms no longer burn the whole retry budget in one burst).
+- Longer delays after route-churn messages (`Audio device changed`, etc.) before retrying; slightly longer built-in fallback delay.
+- Tighter failure cap (`> 3` distinct events instead of `> 4`).
+- Docs: system log correlation for Bose QC45 HFP incident; app-side recovery notes.
+
+### What this targets
+
+- **Not** a replacement for `v1.11`’s engine-running check — it complements it when the OS really stops the engine and fires many failure callbacks in a short window.
+
+---
+
 ## Current behavior summary
 
 | Version | Main idea | What improved | What still failed |
@@ -172,6 +187,7 @@ then this may need another iteration.
 | `v1.9` | Zombie-delay in `forceReset()` | Fixed one confirmed CoreAudio crash path | `stopRecording()` still had same release bug |
 | `v1.10` | Zombie-delay in `stopRecording()` too | Closed second deallocation gap | Reconnect loop still possible |
 | `v1.11` | Ignore config changes if engine still running | Stops self-inflicted reconnect loop in current testing | Not yet proven against every headset / route-change pattern |
+| `v1.12` | Coalesce retry failures + settle delays | Fewer wasted retries during HFP churn; clearer recovery | HFP stack can still be flaky at the OS level |
 
 ---
 
@@ -198,11 +214,12 @@ After `v1.10` and `v1.11`, both `stopRecording()` and `forceReset()` use the sam
 
 ### `AppState.handleRecordingFailure()`
 
-This did not change in `v1.11`, but it matters for understanding the system:
+In `v1.11` this was unchanged; **`v1.12`** updates it:
 
-- first retry: same device after 1 second
-- later retries: built-in mic fallback
-- max retries: 4 attempts, then give up with a clear error
+- coalesce duplicate `onRecordingFailed` calls while a reconnect task is already scheduled
+- first retry: same device after a delay (longer for route-churn messages)
+- later retries: built-in mic fallback with a slightly longer delay
+- max distinct failures: 3, then give up with a clear error
 
 The loop was not here. The loop was caused upstream by `AudioRecorder` repeatedly declaring failure after successful restarts.
 
@@ -258,6 +275,57 @@ Pull logs first:
 2. Did the watchdog fire, or did we tear down before audio had a chance to stabilize?
 3. Was the retry on default device, or already on built-in mic?
 4. Did the issue happen only with one headset model, or also with built-in mic / wired audio?
+
+---
+
+## System log correlation (Bose QC45 HFP, 2026-03-23 ~14:34)
+
+Captured with a **narrow time window** so the log is not truncated:
+
+```bash
+/usr/bin/log show --info --style compact \
+  --start '2026-03-23 14:34:20' --end '2026-03-23 14:35:10' \
+  --predicate 'process == "DICTATR" OR process == "coreaudiod" OR process == "audiomxd" OR senderImagePath CONTAINS[c] "CoreAudio" OR eventMessage CONTAINS[c] "4361"'
+```
+
+### What the system was doing (same PID 4361 throughout)
+
+1. **HFP / BTAudio churn** — `coreaudiod` repeatedly logged:
+   - `HFPInputShimDevice: Reconfigure of Output Device required: Request Config change`
+   - `HFP shim Requesting Reconfigure output device to Best sample rate After 2sec`
+   - `BTAudioInputShimDevice: Cancel Delayed reconfigure of Peer Audio` (debounced reconfigure storm)
+
+2. **AVAudioEngine stopped by the OS, not only by DICTATR** — **before** our `AudioRecorder` “tearing down” line, `AVAudioEngine` already logged:
+   - `iounit configuration changed > stopping the engine` → `stop, was running 1`
+   - Then ~250ms later: `iounit configuration changed > posting notification` (this is when our handler runs and logs).
+
+3. **Exact alignment at the first failure in the burst** (~14:34:31–14:34:32):
+
+   | Time | Source | Signal |
+   |------|--------|--------|
+   | 14:34:31.965 | DICTATR | `Engine@…: start, was running 0` |
+   | 14:34:31.978 | coreaudiod / BTAudio | `Reconfigure of Output Device required: Request Config change` |
+   | 14:34:32.211 | AVAudioEngine | `iounit configuration changed > stopping the engine` |
+   | 14:34:32.459 | AudioRecorder | `Audio configuration changed during recording and engine stopped — tearing down for fresh start` |
+
+4. **Transient device loss** — at **14:34:36.069**, `coreaudiod` logged:
+   - `HFP shim Reconfigure output audio device skipped, no device available …`
+   - Same timestamp: `… IO 1, quality 1, format 1` (shim gave up while peer/device state was inconsistent).
+
+5. **Why taps failed** — DICTATR logged `AVAudioEngineGraph: Failed to create tap, config change pending!` while HFP was still reconfiguring; this matches “0 frames” / watchdog auto-stop, not a logic bug in frame counting alone.
+
+### Takeaway for future debugging
+
+- **`v1.11`’s “ignore config change if engine still running”** targets **transient notifications** while IO is healthy. In this incident, **`engine.isRunning` was false** because **AVAudioEngine had already been stopped by the configuration change** — so teardown was appropriate.
+- The underlying driver of the storm is **Bluetooth HFP sample-rate / output reconfiguration** on the Bose route, not a single mistaken `stop()` in app code (though session category flips like `PlayAndRecord` ↔ `MediaPlayback` still appear around preview/output paths and are worth watching).
+
+### App-side recovery (not a reboot)
+
+Apps **cannot** restart macOS. A reboot helps because **time passes** and Core Audio / Bluetooth settle. Mitigations in `AppState`:
+
+- **Coalesce** rapid `onRecordingFailure` callbacks while a reconnect attempt is already scheduled (one HFP burst → one retry “ticket”, not five).
+- **Slightly longer delays** after route-churn messages (e.g. “Audio device changed”) before retrying — closer to what a reboot indirectly provides.
+- **Tighter cap** on distinct failure events so the UI doesn’t spin through useless retries; fall back to built-in mic and then stop with a clear error.
 
 ---
 

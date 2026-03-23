@@ -89,6 +89,9 @@ final class AppState {
     private var transcriptionTask: Task<Void, Never>?
     private var autoRetryTask: Task<Void, Never>?
     private var autoRetryCount = 0
+    /// True while a reconnect retry is scheduled or sleeping. Prevents an HFP "storm"
+    /// (many `onRecordingFailed` callbacks in one burst) from burning the whole retry budget.
+    private var recordingRecoveryPending = false
     private let recordingIndicator = RecordingIndicatorPanel()
 
     var menuBarIcon: String {
@@ -193,6 +196,7 @@ final class AppState {
         switch currentState {
         case .idle:
             autoRetryCount = 0
+            recordingRecoveryPending = false
             autoRetryTask?.cancel()
             audioRecorder.useBuiltInMic = false
             startRecording()
@@ -226,17 +230,24 @@ final class AppState {
         }
     }
 
-    // Recovery strategy: try default device once more after 1s, then immediately
-    // fall back to built-in mic. Only changes the input - audio output stays on
-    // headphones so music/YouTube keeps playing through them.
-    // Max 4 total attempts to prevent infinite retry loops (1 default + 1 built-in + 2 extra).
+    // Recovery strategy: try default device once more after a short delay, then fall back
+    // to built-in mic. Only changes the input — audio output stays on headphones.
+    //
+    // Max 3 failure *events* (after coalescing). A reboot "fixes" Bluetooth/HFP because
+    // Core Audio clears stuck state; we approximate that with longer settle delays after
+    // route-churn messages, not by rebooting the Mac (apps can't).
     private func handleRecordingFailure(message: String) {
+        if recordingRecoveryPending {
+            Self.logger.info("Ignoring duplicate recording failure while recovery already scheduled (HFP burst coalescing)")
+            return
+        }
+
         Self.logger.error("Recording auto-stopped: \(message)")
         autoRetryCount += 1
 
-        if autoRetryCount > 4 {
-            // Too many failures - stop retrying entirely
+        if autoRetryCount > 3 {
             Self.logger.error("Exceeded max retries (\(self.autoRetryCount)) — giving up")
+            recordingRecoveryPending = false
             autoRetryTask?.cancel()
             currentState = .idle
             statusMessage = "Recording failed"
@@ -245,34 +256,60 @@ final class AppState {
             return
         }
 
+        let delaySeconds = Self.delayBeforeReconnectAttempt(message: message, attempt: autoRetryCount)
+
         if autoRetryCount == 1 {
-            // First failure: quick retry with same device (handles brief glitches)
-            Self.logger.info("Quick retry in 1s with default device...")
+            Self.logger.info("Scheduling retry in \(String(format: "%.1f", delaySeconds))s with default device...")
             currentState = .idle
             statusMessage = "Reconnecting..."
             recordingIndicator.showReconnecting()
 
+            recordingRecoveryPending = true
             autoRetryTask?.cancel()
-            autoRetryTask = Task {
-                try? await Task.sleep(for: .seconds(1.0))
-                guard !Task.isCancelled, self.currentState == .idle else { return }
+            autoRetryTask = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(delaySeconds))
+                guard let self else { return }
+                guard !Task.isCancelled, self.currentState == .idle else {
+                    self.recordingRecoveryPending = false
+                    return
+                }
+                self.recordingRecoveryPending = false
                 self.retryStartRecording()
             }
         } else {
-            // Second+ failure: default device is broken, fall back to built-in mic
             Self.logger.info("Default device failed \(self.autoRetryCount) times — falling back to built-in mic")
             audioRecorder.useBuiltInMic = true
             currentState = .idle
             statusMessage = "Using MacBook mic..."
             recordingIndicator.showReconnecting()
 
+            recordingRecoveryPending = true
             autoRetryTask?.cancel()
-            autoRetryTask = Task {
-                try? await Task.sleep(for: .seconds(0.5))
-                guard !Task.isCancelled, self.currentState == .idle else { return }
+            autoRetryTask = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(delaySeconds))
+                guard let self else { return }
+                guard !Task.isCancelled, self.currentState == .idle else {
+                    self.recordingRecoveryPending = false
+                    return
+                }
+                self.recordingRecoveryPending = false
                 self.retryStartRecording()
             }
         }
+    }
+
+    /// Longer delay after route / HFP churn (similar to what a reboot indirectly provides: time to settle).
+    private static func delayBeforeReconnectAttempt(message: String, attempt: Int) -> TimeInterval {
+        let routeChurn =
+            message.localizedCaseInsensitiveContains("audio device") ||
+            message.localizedCaseInsensitiveContains("reconnecting") ||
+            message.localizedCaseInsensitiveContains("device changed")
+
+        if attempt == 1 {
+            return routeChurn ? 2.5 : 1.0
+        }
+        // Built-in fallback attempts: give Core Audio a moment after Bluetooth chaos.
+        return routeChurn ? 2.0 : 1.5
     }
 
     private func retryStartRecording() {
