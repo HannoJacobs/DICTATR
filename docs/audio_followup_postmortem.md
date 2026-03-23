@@ -1,6 +1,6 @@
 # Audio Follow-up Postmortem: Crash Fixes and Reconnect Loop
 
-**Status:** Seems improved in `v1.11`–`v1.12`, but should be treated as "working in current testing" rather than permanently resolved.
+**Status:** Seems improved in `v1.11`–`v1.13`, but should be treated as "working in current testing" rather than permanently resolved.
 **Files:** `Sources/DICTATR/AudioRecorder.swift`, `Sources/DICTATR/AppState.swift`, `create-dmg.sh`
 **Related doc:** `docs/audio_bug_postmortem.md`
 
@@ -164,7 +164,7 @@ then this may need another iteration.
 
 ---
 
-## `v1.12` - Retry coalescing and HFP-settle delays (`AppState`)
+## `v1.13` - Retry coalescing and HFP-settle delays (`AppState`)
 
 ### Edits made
 
@@ -176,6 +176,7 @@ then this may need another iteration.
 ### What this targets
 
 - **Not** a replacement for `v1.11`’s engine-running check — it complements it when the OS really stops the engine and fires many failure callbacks in a short window.
+  (Shipped as `v1.13`; `v1.12` on GitHub was the local HTTP transcription server release.)
 
 ---
 
@@ -187,7 +188,7 @@ then this may need another iteration.
 | `v1.9` | Zombie-delay in `forceReset()` | Fixed one confirmed CoreAudio crash path | `stopRecording()` still had same release bug |
 | `v1.10` | Zombie-delay in `stopRecording()` too | Closed second deallocation gap | Reconnect loop still possible |
 | `v1.11` | Ignore config changes if engine still running | Stops self-inflicted reconnect loop in current testing | Not yet proven against every headset / route-change pattern |
-| `v1.12` | Coalesce retry failures + settle delays | Fewer wasted retries during HFP churn; clearer recovery | HFP stack can still be flaky at the OS level |
+| `v1.13` | Coalesce retry failures + settle delays | Fewer wasted retries during HFP churn; clearer recovery | HFP stack can still be flaky at the OS level |
 
 ---
 
@@ -214,7 +215,7 @@ After `v1.10` and `v1.11`, both `stopRecording()` and `forceReset()` use the sam
 
 ### `AppState.handleRecordingFailure()`
 
-In `v1.11` this was unchanged; **`v1.12`** updates it:
+In `v1.11` this was unchanged; **`v1.13`** updates it:
 
 - coalesce duplicate `onRecordingFailed` calls while a reconnect task is already scheduled
 - first retry: same device after a delay (longer for route-churn messages)
