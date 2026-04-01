@@ -6,6 +6,8 @@ BUNDLE_ID="com.hannojacobs.DICTATR"
 DMG_NAME="${APP_NAME}.dmg"
 APP_BUNDLE="${APP_NAME}.app"
 BUILD_DIR="build-release"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SOURCE_PLIST="$SCRIPT_DIR/Sources/DICTATR/Info.plist"
 
 # Find the Release binary from Xcode's DerivedData
 BINARY=$(find ~/Library/Developer/Xcode/DerivedData -path "*/Release/${APP_NAME}" -type f 2>/dev/null | head -1)
@@ -31,43 +33,17 @@ mkdir -p "$BUILD_DIR/$APP_BUNDLE/Contents/Resources"
 cp "$BINARY" "$BUILD_DIR/$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 
 # Copy app icon
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 if [ -f "$SCRIPT_DIR/AppIcon.icns" ]; then
     cp "$SCRIPT_DIR/AppIcon.icns" "$BUILD_DIR/$APP_BUNDLE/Contents/Resources/AppIcon.icns"
     echo "Included app icon"
 fi
 
-# Create Info.plist
-cat > "$BUILD_DIR/$APP_BUNDLE/Contents/Info.plist" << 'PLIST'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>CFBundleIdentifier</key>
-    <string>com.hannojacobs.DICTATR</string>
-    <key>CFBundleName</key>
-    <string>DICTATR</string>
-    <key>CFBundleDisplayName</key>
-    <string>DICTATR</string>
-    <key>CFBundleExecutable</key>
-    <string>DICTATR</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>CFBundleVersion</key>
-    <string>1.13</string>
-    <key>CFBundleShortVersionString</key>
-    <string>1.13</string>
-    <key>NSMicrophoneUsageDescription</key>
-    <string>DICTATR needs microphone access to record your dictation.</string>
-    <key>LSUIElement</key>
-    <true/>
-    <key>NSHighResolutionCapable</key>
-    <true/>
-    <key>CFBundleIconFile</key>
-    <string>AppIcon</string>
-</dict>
-</plist>
-PLIST
+if [ ! -f "$SOURCE_PLIST" ]; then
+    echo "Error: Missing source Info.plist at $SOURCE_PLIST"
+    exit 1
+fi
+
+cp "$SOURCE_PLIST" "$BUILD_DIR/$APP_BUNDLE/Contents/Info.plist"
 
 echo "Created $APP_BUNDLE"
 

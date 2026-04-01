@@ -1,6 +1,6 @@
 # Audio Follow-up Postmortem: Crash Fixes and Reconnect Loop
 
-**Status:** Seems improved in `v1.11`–`v1.13`, but should be treated as "working in current testing" rather than permanently resolved.
+**Status:** Seems improved in `v1.11`–`v1.13`; `v1.15` adds persistent diagnostics so future regressions can be traced from one launch log instead of depending on unified logging alone.
 **Files:** `Sources/DICTATR/AudioRecorder.swift`, `Sources/DICTATR/AppState.swift`, `create-dmg.sh`
 **Related doc:** `docs/audio_bug_postmortem.md`
 
@@ -177,6 +177,23 @@ then this may need another iteration.
 
 - **Not** a replacement for `v1.11`’s engine-running check — it complements it when the OS really stops the engine and fires many failure callbacks in a short window.
   (Shipped as `v1.13`; `v1.12` on GitHub was the local HTTP transcription server release.)
+
+---
+
+## `v1.15` - Diagnostic visibility release
+
+### Edits made
+
+- Added persistent per-launch logs under `~/Library/Application Support/DICTATR/Logs/`
+- Logged app launch/reopen metadata: version, build, PID, OS build, hardware model, bundle path
+- Logged full audio device inventory at launch
+- Logged recording start/retry/config-change/watchdog/force-reset transitions with route snapshots and frame counters
+
+### What this targets
+
+- The remaining uncertainty from `v1.11`: cases where `engine.isRunning == true` but the route is effectively broken
+- Future Bluetooth/HFP bugs that are hard to reconstruct from CoreAudio logs alone
+- Faster correlation between "user-visible reconnect loop" and the exact app-side decision path
 
 ---
 

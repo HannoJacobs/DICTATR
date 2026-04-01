@@ -35,19 +35,27 @@ struct ModelDownloadView: View {
                     .controlSize(.regular)
                 } else if appState.transcriptionEngine.isLoading {
                     // Download/loading in progress
-                    ProgressView(value: appState.transcriptionEngine.downloadProgress) {
-                        Text(appState.transcriptionEngine.loadingPhase)
-                            .font(.subheadline)
-                    } currentValueLabel: {
-                        Text(progressText)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .monospacedDigit()
+                    if usesIndeterminateProgress {
+                        ProgressView {
+                            Text(appState.transcriptionEngine.loadingPhase)
+                                .font(.subheadline)
+                        }
+                    } else {
+                        ProgressView(value: appState.transcriptionEngine.downloadProgress) {
+                            Text(appState.transcriptionEngine.loadingPhase)
+                                .font(.subheadline)
+                        } currentValueLabel: {
+                            Text(progressText)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                        }
                     }
 
-                    Text("This only happens once.")
+                    Text(loadingDetailText)
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
+                        .multilineTextAlignment(.center)
                 } else {
                     // Not started yet — kick it off
                     ProgressView()
@@ -62,7 +70,7 @@ struct ModelDownloadView: View {
             Spacer()
         }
         .padding(28)
-        .frame(width: 320, height: 320)
+        .frame(width: 320, height: 340)
         .onAppear {
             if !appState.transcriptionEngine.isLoading && !appState.transcriptionEngine.isModelLoaded {
                 appState.startModelDownload()
@@ -72,9 +80,26 @@ struct ModelDownloadView: View {
 
     private var progressText: String {
         let pct = Int(appState.transcriptionEngine.downloadProgress * 100)
-        if appState.transcriptionEngine.loadingPhase == "Loading model..." {
-            return "Almost ready..."
+        if pct <= 0 {
+            return "Starting..."
         }
         return "\(pct)%"
+    }
+
+    private var usesIndeterminateProgress: Bool {
+        switch appState.transcriptionEngine.loadingPhase {
+        case "Selecting model...", "Checking model files...", "Using cached model files...", "Compiling on-device model...":
+            return true
+        default:
+            return false
+        }
+    }
+
+    private var loadingDetailText: String {
+        if !appState.transcriptionEngine.loadingDetail.isEmpty {
+            return appState.transcriptionEngine.loadingDetail
+        }
+
+        return "The first load after an install, update, or cache reset can take several minutes."
     }
 }

@@ -22,7 +22,8 @@ let package = Package(
                 .product(name: "LaunchAtLogin", package: "LaunchAtLogin-Modern"),
                 .product(name: "GRDB", package: "GRDB.swift"),
             ],
-            path: "Sources/DICTATR"
+            path: "Sources/DICTATR",
+            exclude: ["Info.plist"]
         ),
     ]
 )

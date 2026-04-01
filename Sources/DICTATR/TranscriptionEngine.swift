@@ -37,40 +37,84 @@ final class TranscriptionEngine {
     private(set) var isLoading = false
     private(set) var downloadProgress: Double = 0
     private(set) var loadingPhase: String = ""
+    private(set) var loadingDetail: String = ""
 
     private var whisperKit: WhisperKit?
+    private var loadHeartbeatTask: Task<Void, Never>?
+    private var nextDownloadLogThreshold: Double = 0.1
 
     func loadModel() async throws {
-        guard !isLoading else { return }
+        guard !isLoading else {
+            AppDiagnostics.warning(.transcriptionEngine, "loadModel ignored because a model load is already in progress phase=\(loadingPhase)")
+            return
+        }
 
+        let loadStartedAt = Date()
         isLoading = true
         downloadProgress = 0
-        loadingPhase = "Loading model..."
+        loadingPhase = "Selecting model..."
+        loadingDetail = "Inspecting device support and cached WhisperKit files."
+        nextDownloadLogThreshold = 0.1
 
         do {
             // Use WhisperKit's recommended model for this device
             let recommended = WhisperKit.recommendedModels()
             let variant = recommended.default
+            startLoadHeartbeat(variant: variant, startedAt: loadStartedAt)
+            defer { stopLoadHeartbeat() }
 
-            // Step 1: Download model with progress tracking
-            let modelFolder = try await WhisperKit.download(
-                variant: variant,
-                progressCallback: { [weak self] progress in
-                    Task { @MainActor in
-                        self?.downloadProgress = progress.fractionCompleted
-                    }
-                }
+            AppDiagnostics.info(
+                .transcriptionEngine,
+                "Model load requested variant=\(variant) compiledCache=\(Self.compiledCacheSummary())"
             )
 
+            // Step 1: Use the local cached model folder when it already exists.
+            // Falling back to WhisperKit.download() forces remote model discovery even
+            // when the files are on disk, which can make startup look hung.
+            let modelFolder: URL
+            if let cachedModelFolder = Self.cachedModelFolder(for: variant) {
+                loadingPhase = "Using cached model files..."
+                loadingDetail = "Using cached WhisperKit files for \(variant)."
+                downloadProgress = 1.0
+                modelFolder = cachedModelFolder
+                AppDiagnostics.info(
+                    .transcriptionEngine,
+                    "Using cached local model folder variant=\(variant) folder=\(modelFolder.path) remoteLookup=skipped compiledCache=\(Self.compiledCacheSummary())"
+                )
+            } else {
+                let downloadStartedAt = Date()
+                loadingPhase = "Checking model files..."
+                loadingDetail = "Checking cached WhisperKit files for \(variant)."
+                modelFolder = try await WhisperKit.download(
+                    variant: variant,
+                    progressCallback: { [weak self] progress in
+                        Task { @MainActor in
+                            self?.handleDownloadProgress(progress, variant: variant)
+                        }
+                    }
+                )
+
+                let downloadElapsed = Date().timeIntervalSince(downloadStartedAt)
+                AppDiagnostics.info(
+                    .transcriptionEngine,
+                    "Model files ready variant=\(variant) folder=\(modelFolder.path) downloadElapsed=\(Self.durationString(downloadElapsed)) compiledCache=\(Self.compiledCacheSummary())"
+                )
+            }
+
             guard !Task.isCancelled else {
-                self.isLoading = false
-                self.loadingPhase = ""
+                resetLoadingState()
                 throw CancellationError()
             }
 
             // Step 2: Load the downloaded model into memory
-            loadingPhase = "Loading model..."
+            let compileStartedAt = Date()
+            loadingPhase = "Compiling on-device model..."
+            loadingDetail = "Compiling \(variant) for Apple Neural Engine. After an install, update, or cache reset this can take several minutes."
             downloadProgress = 1.0
+            AppDiagnostics.info(
+                .transcriptionEngine,
+                "CoreML load started variant=\(variant) folder=\(modelFolder.path) compiledCache=\(Self.compiledCacheSummary())"
+            )
 
             let pipe = try await WhisperKit(
                 WhisperKitConfig(
@@ -83,19 +127,28 @@ final class TranscriptionEngine {
             )
 
             guard !Task.isCancelled else {
-                self.isLoading = false
-                self.loadingPhase = ""
+                resetLoadingState()
                 throw CancellationError()
             }
 
             self.whisperKit = pipe
             self.isModelLoaded = true
-            self.isLoading = false
-            self.loadingPhase = ""
+            let compileElapsed = Date().timeIntervalSince(compileStartedAt)
+            let totalElapsed = Date().timeIntervalSince(loadStartedAt)
+            let completionMessage = "Model load completed variant=\(variant) folder=\(modelFolder.path) compileElapsed=\(Self.durationString(compileElapsed)) totalElapsed=\(Self.durationString(totalElapsed)) compiledCache=\(Self.compiledCacheSummary())"
+            if totalElapsed >= 30 {
+                AppDiagnostics.warning(.transcriptionEngine, completionMessage)
+            } else {
+                AppDiagnostics.info(.transcriptionEngine, completionMessage)
+            }
+            resetLoadingState()
         } catch {
-            self.isLoading = false
-            self.loadingPhase = ""
-            self.downloadProgress = 0
+            let elapsed = Date().timeIntervalSince(loadStartedAt)
+            AppDiagnostics.error(
+                .transcriptionEngine,
+                "Model load failed phase=\(loadingPhase) detail=\(loadingDetail) progress=\(Self.progressString(downloadProgress)) elapsed=\(Self.durationString(elapsed)) compiledCache=\(Self.compiledCacheSummary()) error=\(error.localizedDescription)"
+            )
+            resetLoadingState()
             throw error
         }
     }
@@ -120,6 +173,115 @@ final class TranscriptionEngine {
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
         return text
+    }
+
+    private func handleDownloadProgress(_ progress: Progress, variant: String) {
+        let fractionCompleted = progress.fractionCompleted
+        downloadProgress = fractionCompleted
+
+        if fractionCompleted > 0, loadingPhase != "Downloading model..." {
+            loadingPhase = "Downloading model..."
+            loadingDetail = "Downloading WhisperKit model files for \(variant)."
+            AppDiagnostics.info(.transcriptionEngine, "Model download started variant=\(variant)")
+        }
+
+        while fractionCompleted >= nextDownloadLogThreshold, nextDownloadLogThreshold <= 1.0 {
+            AppDiagnostics.info(
+                .transcriptionEngine,
+                "Model download progress variant=\(variant) progress=\(Self.progressString(nextDownloadLogThreshold))"
+            )
+            nextDownloadLogThreshold += 0.1
+        }
+    }
+
+    private func startLoadHeartbeat(variant: String, startedAt: Date) {
+        stopLoadHeartbeat()
+        loadHeartbeatTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 15_000_000_000)
+                guard !Task.isCancelled, let self, self.isLoading else { return }
+
+                let elapsed = Date().timeIntervalSince(startedAt)
+                AppDiagnostics.warning(
+                    .transcriptionEngine,
+                    "Model load still running variant=\(variant) phase=\(self.loadingPhase) progress=\(Self.progressString(self.downloadProgress)) elapsed=\(Self.durationString(elapsed)) detail=\(self.loadingDetail) compiledCache=\(Self.compiledCacheSummary())"
+                )
+            }
+        }
+    }
+
+    private func stopLoadHeartbeat() {
+        loadHeartbeatTask?.cancel()
+        loadHeartbeatTask = nil
+    }
+
+    private func resetLoadingState() {
+        stopLoadHeartbeat()
+        isLoading = false
+        loadingPhase = ""
+        loadingDetail = ""
+        downloadProgress = 0
+        nextDownloadLogThreshold = 0.1
+    }
+
+    private static func compiledCacheSummary() -> String {
+        let cacheRoot = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+        let bundleID = Bundle.main.bundleIdentifier ?? "com.dictatr"
+        let cacheURL = cacheRoot?
+            .appendingPathComponent(bundleID, isDirectory: true)
+            .appendingPathComponent("com.apple.e5rt.e5bundlecache", isDirectory: true)
+
+        guard let cacheURL else {
+            return "unavailable"
+        }
+
+        guard FileManager.default.fileExists(atPath: cacheURL.path) else {
+            return "missing path=\(cacheURL.path)"
+        }
+
+        return "path=\(cacheURL.path) exists=yes"
+    }
+
+    private static func cachedModelFolder(for variant: String) -> URL? {
+        guard let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
+            return nil
+        }
+
+        let modelFolder = documents
+            .appendingPathComponent("huggingface", isDirectory: true)
+            .appendingPathComponent("models", isDirectory: true)
+            .appendingPathComponent("argmaxinc", isDirectory: true)
+            .appendingPathComponent("whisperkit-coreml", isDirectory: true)
+            .appendingPathComponent(variant, isDirectory: true)
+
+        guard FileManager.default.fileExists(atPath: modelFolder.path) else {
+            return nil
+        }
+
+        let requiredEntries = [
+            "AudioEncoder.mlmodelc",
+            "MelSpectrogram.mlmodelc",
+            "TextDecoder.mlmodelc"
+        ]
+
+        guard requiredEntries.allSatisfy({ FileManager.default.fileExists(atPath: modelFolder.appendingPathComponent($0).path) }) else {
+            return nil
+        }
+
+        return modelFolder
+    }
+
+    private static func durationString(_ interval: TimeInterval) -> String {
+        if interval >= 60 {
+            return String(format: "%.2fs (%.1fm)", interval, interval / 60)
+        }
+
+        return String(format: "%.2fs", interval)
+    }
+
+    private static func progressString(_ fractionCompleted: Double) -> String {
+        let percentage = max(0, min(100, Int((fractionCompleted * 100).rounded())))
+        return "\(percentage)%"
     }
 }
 

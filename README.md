@@ -49,7 +49,9 @@ Everything is orchestrated by `AppState`, a central `@Observable @MainActor` cla
 4. Grant **Microphone** permission when prompted
 5. Grant **Accessibility** in System Settings → Privacy & Security → Accessibility
 
-On first launch the WhisperKit model downloads (~500MB–1GB, one time only).
+On first launch the WhisperKit model downloads (~500MB–1GB). After an install, update,
+or cache reset, the first CoreML/Apple Neural Engine compile can also take several
+minutes even when the model files are already present.
 
 ---
 
@@ -86,14 +88,15 @@ The website's visible version label is also dynamic now: `docs/index.html` fetch
 latest GitHub release and displays its `tag_name`. No manual website version bump is needed
 for normal releases.
 
-Important: the **app bundle version is not dynamic**. The DMG/app metadata comes from the
-hardcoded `Info.plist` block inside `create-dmg.sh`, so `CFBundleVersion` and
-`CFBundleShortVersionString` must be updated manually for each release.
+Important: the **app bundle version is not dynamic**. The DMG/app metadata now comes from
+[`Sources/DICTATR/Info.plist`](/Users/hannojacobs/Documents/Code/DICTATR/Sources/DICTATR/Info.plist),
+so `CFBundleVersion` and `CFBundleShortVersionString` must still be updated manually for
+each release, but there is now a single source of truth.
 
 **To ship a new version:**
 
 ```bash
-# 0. Bump version in create-dmg.sh
+# 0. Bump version in Sources/DICTATR/Info.plist
 #    Update CFBundleVersion and CFBundleShortVersionString
 
 # 1. Build Release in Xcode (Cmd+B with Release config)
@@ -130,6 +133,39 @@ To keep local version reporting aligned with the deployed build, also update:
 ```bash
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion X.Y" /Applications/DICTATR.app/Contents/Info.plist
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString X.Y" /Applications/DICTATR.app/Contents/Info.plist
+```
+
+### Diagnostics Logs
+
+DICTATR now writes persistent per-launch diagnostics logs to:
+
+```bash
+~/Library/Application\ Support/DICTATR/Logs/
+```
+
+Files are named like:
+
+```bash
+dictatr-20260401-205500-ab12cd34.log
+latest.log
+```
+
+What gets logged:
+- App launch / reopen with version, build, PID, macOS build, hardware model, bundle path, and diagnostics file path
+- Model startup with selected WhisperKit variant, resolved model folder, compiled-cache snapshot, download milestones, per-phase timings, and long-load heartbeats
+- Full audio device inventory at launch
+- Recording start, input format, built-in mic override attempts, config changes, watchdog failures, retries, and force resets
+- Stop/transcription/paste/history-save transitions
+
+Normal relaunches now prefer the local cached model folder directly when it already exists,
+instead of doing a remote HuggingFace lookup just to rediscover files that are already on disk.
+
+Useful commands:
+
+```bash
+tail -f ~/Library/Application\ Support/DICTATR/Logs/latest.log
+ls -lt ~/Library/Application\ Support/DICTATR/Logs
+rg -n "watchdog|config change|retry|force reset|built-in mic|recording start" ~/Library/Application\ Support/DICTATR/Logs/latest.log
 ```
 
 ---
