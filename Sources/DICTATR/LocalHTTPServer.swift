@@ -45,9 +45,9 @@ final class LocalHTTPServer: @unchecked Sendable {
             listener.stateUpdateHandler = { state in
                 switch state {
                 case .ready:
-                    Self.logger.info("HTTP server listening on 127.0.0.1:\(self.port)")
+                    AppDiagnostics.info(.httpServer, "HTTP server listening on 127.0.0.1:\(self.port)")
                 case .failed(let error):
-                    Self.logger.error("HTTP server failed: \(error.localizedDescription)")
+                    AppDiagnostics.error(.httpServer, "HTTP server failed error=\(error.localizedDescription)")
                 default:
                     break
                 }
@@ -59,14 +59,14 @@ final class LocalHTTPServer: @unchecked Sendable {
 
             listener.start(queue: .global(qos: .utility))
         } catch {
-            Self.logger.error("Failed to create HTTP listener: \(error.localizedDescription)")
+            AppDiagnostics.error(.httpServer, "Failed to create HTTP listener error=\(error.localizedDescription)")
         }
     }
 
     func stop() {
         listener?.cancel()
         listener = nil
-        Self.logger.info("HTTP server stopped")
+        AppDiagnostics.info(.httpServer, "HTTP server stopped")
     }
 
     // MARK: - Connection handling
@@ -120,7 +120,10 @@ final class LocalHTTPServer: @unchecked Sendable {
             if contentLength > 0, currentBody.count < contentLength {
                 if isComplete || error != nil {
                     // Connection closed before full body received — process what we have
-                    Self.logger.warning("Connection closed with \(currentBody.count)/\(contentLength) body bytes")
+                    AppDiagnostics.warning(
+                        .httpServer,
+                        "Connection closed early bodyBytes=\(currentBody.count)/\(contentLength)"
+                    )
                     self.routeRequest(connection: connection, header: headerString, body: Data(currentBody))
                     return
                 }
@@ -183,12 +186,12 @@ final class LocalHTTPServer: @unchecked Sendable {
         do {
             try body.write(to: tempURL)
         } catch {
-            Self.logger.error("Failed to write temp file: \(error.localizedDescription)")
+            AppDiagnostics.error(.httpServer, "Failed to write temp file error=\(error.localizedDescription)")
             Self.sendResponse(connection: connection, status: 500, body: "Failed to write temp file")
             return
         }
 
-        Self.logger.info("Received \(body.count) bytes (\(ext)) for transcription")
+        AppDiagnostics.info(.httpServer, "Received transcription request bytes=\(body.count) ext=\(ext)")
 
         let transcribe = self.transcribe
         Task {
@@ -196,9 +199,9 @@ final class LocalHTTPServer: @unchecked Sendable {
             do {
                 let text = try await transcribe(tempURL)
                 Self.sendResponse(connection: connection, status: 200, body: text)
-                Self.logger.info("Transcription served: \(text.count) chars")
+                AppDiagnostics.info(.httpServer, "Transcription served chars=\(text.count)")
             } catch {
-                Self.logger.error("Transcription failed: \(error.localizedDescription)")
+                AppDiagnostics.error(.httpServer, "Transcription failed error=\(error.localizedDescription)")
                 Self.sendResponse(connection: connection, status: 500, body: "Transcription failed: \(error.localizedDescription)")
             }
         }

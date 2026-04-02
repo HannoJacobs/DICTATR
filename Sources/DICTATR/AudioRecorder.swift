@@ -18,6 +18,19 @@
 //   startRecording() → installs tap, starts engine, returns URL
 //   stopRecording()  → signals tap to stop (atomic), removes tap, stops engine, returns (url, duration)
 //   The caller (AppState) owns cleanup of the WAV file after transcription.
+//
+// BLUETOOTH HFP HANDLING (v1.14):
+//   Bluetooth headphones switch from A2DP to HFP when mic input is activated by
+//   engine.start(). The format looks valid (44100Hz A2DP) before start, so we can't
+//   detect HFP in advance. Two things happen:
+//
+//   1. Engine gets killed by CoreAudio during HFP negotiate (~168ms after start).
+//      This is unavoidable. AppState's retry handles it.
+//
+//   2. On retry (especially built-in mic fallback), the engine stays running but
+//      a config change fires as HFP finishes settling. The tap is silently invalidated
+//      by the hardware reconfiguration. Fix: reinstall the tap on config change
+//      instead of ignoring it.
 
 import AVFoundation
 import CoreAudio
@@ -29,6 +42,7 @@ import os
 final class AudioRecorder {
     private(set) var isRecording = false
     private(set) var recordingDuration: TimeInterval = 0
+    private(set) var recordingSessionID: String?
 
     private static let logger = Logger(subsystem: "com.dictatr", category: "AudioRecorder")
 
@@ -39,12 +53,14 @@ final class AudioRecorder {
     private var durationTimer: Timer?
     private var configObserver: NSObjectProtocol?
     private var noAudioWatchdog: Timer?
+
+    /// Stored for tap reinstallation after config changes.
+    private var activeTargetFormat: AVAudioFormat?
+
     var onRecordingFailed: ((String) -> Void)?
     var onRecordingStable: (() -> Void)?
 
     // Thread-safe flags readable from the real-time audio thread.
-    // @Observable's isRecording is not safe to read from the audio thread.
-    // OSAllocatedUnfairLock provides proper atomicity for cross-thread access.
     private let _isCapturing = OSAllocatedUnfairLock(initialState: false)
     private let _framesWritten = OSAllocatedUnfairLock(initialState: Int64(0))
     private let _droppedFrames = OSAllocatedUnfairLock(initialState: Int64(0))
@@ -54,52 +70,39 @@ final class AudioRecorder {
     var useBuiltInMic = false
 
     func startRecording() throws -> URL {
-        // Guard against double-start — clean up any existing session first
+        // Guard against double-start
         if isRecording {
-            Self.logger.warning("startRecording() called while already recording — cleaning up previous session")
+            AppDiagnostics.warning(
+                .audioRecorder,
+                "startRecording while already recording session=\(recordingSessionID ?? "none") — cleaning up previous session"
+            )
             if let result = stopRecording() {
                 try? FileManager.default.removeItem(at: result.url)
             }
         }
 
+        let sessionID = String(UUID().uuidString.prefix(8)).lowercased()
+        recordingSessionID = sessionID
         let tempDir = FileManager.default.temporaryDirectory
         let fileName = "dictatr_\(Int(Date().timeIntervalSince1970)).wav"
         let fileURL = tempDir.appendingPathComponent(fileName)
+
+        AppDiagnostics.info(
+            .audioRecorder,
+            "recording start requested session=\(sessionID) useBuiltInMic=\(useBuiltInMic) outputFile=\(fileURL.lastPathComponent) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
+        )
 
         let engine = AVAudioEngine()
         let inputNode = engine.inputNode
 
         // If Bluetooth is stuck, override the engine's input to the built-in mic.
-        if useBuiltInMic, let builtInID = Self.findBuiltInMicDevice(), let audioUnit = inputNode.audioUnit {
-            var deviceID = builtInID
-            let status = AudioUnitSetProperty(
-                audioUnit,
-                kAudioOutputUnitProperty_CurrentDevice,
-                kAudioUnitScope_Global,
-                0,
-                &deviceID,
-                UInt32(MemoryLayout<AudioDeviceID>.size)
-            )
-            if status == noErr {
-                Self.logger.info("Overrode input device to built-in mic (deviceID=\(builtInID))")
-            } else {
-                Self.logger.warning("Failed to set built-in mic (status=\(status)) — using system default")
-            }
-        } else if useBuiltInMic {
-            Self.logger.warning("Cannot override to built-in mic (audioUnit or device not available) — using system default")
-        }
-        let inputFormat = inputNode.outputFormat(forBus: 0)
+        applyDeviceOverride(inputNode: inputNode)
 
-        // Bluetooth devices (AirPods, etc.) switch from AAC to HFP codec when the mic
-        // activates, which briefly reports sampleRate=0. Instead of blocking with a retry
-        // loop, we start immediately and let the configurationChangeNotification handler
-        // reinstall the tap once the codec switch completes. Frames are dropped until then,
-        // tracked by _droppedFrames, and caught by the framesWritten < 800 check at stop.
-        if inputFormat.sampleRate == 0 || inputFormat.channelCount == 0 {
-            Self.logger.warning("Input format not ready (sampleRate=\(inputFormat.sampleRate), channels=\(inputFormat.channelCount)) — Bluetooth codec switch likely in progress. Will recover via config change handler.")
-        } else {
-            Self.logger.info("Recording with input format: \(inputFormat.sampleRate)Hz, \(inputFormat.channelCount)ch")
-        }
+        let inputFormat = inputNode.outputFormat(forBus: 0)
+        AppDiagnostics.info(
+            .audioRecorder,
+            "recording start preflight session=\(sessionID) inputFormat={\(Self.describe(format: inputFormat))}"
+        )
 
         // Target format: 16kHz mono Float32 (what Whisper expects)
         guard let targetFormat = AVAudioFormat(
@@ -118,48 +121,57 @@ final class AudioRecorder {
             interleaved: false
         )
 
-        // Store outputFile before installing tap so closure can access it via self
+        self.audioEngine = engine
         self.outputFile = file
+        self.outputURL = fileURL
+        self.activeTargetFormat = targetFormat
         self._isCapturing.withLock { $0 = true }
         self._framesWritten.withLock { $0 = 0 }
         self._droppedFrames.withLock { $0 = 0 }
-        // Only install the tap if the input format is valid. When sampleRate is 0
-        // (Bluetooth codec switch in progress), skip the tap — the config change
-        // handler will install it once the format becomes valid.
-        let formatValid = inputFormat.sampleRate > 0 && inputFormat.channelCount > 0
-        if formatValid {
-            guard let converter = AVAudioConverter(from: inputFormat, to: targetFormat) else {
-                self._isCapturing.withLock { $0 = false }
-                self.outputFile = nil
-                try? FileManager.default.removeItem(at: fileURL)
-                throw AudioRecorderError.converterCreationFailed
-            }
-            installTap(on: inputNode, inputFormat: inputFormat, targetFormat: targetFormat, converter: converter, file: file)
-        }
-
-        do {
-            try engine.start()
-            Self.logger.info("Engine started (tapInstalled=\(formatValid), file=\(fileURL.lastPathComponent))")
-        } catch {
-            Self.logger.error("Engine failed to start: \(error.localizedDescription)")
-            // Clean up the tap, file, and state since engine failed to start
-            self._isCapturing.withLock { $0 = false }
-            if formatValid { inputNode.removeTap(onBus: 0) }
-            self.outputFile = nil
-            try? FileManager.default.removeItem(at: fileURL)
-            throw error
-        }
-
-        self.audioEngine = engine
-        self.outputURL = fileURL
         self.isRecording = true
         self.recordingDuration = 0
         self.recordingStartTime = ProcessInfo.processInfo.systemUptime
 
-        // Observe audio configuration changes (device connect/disconnect, Bluetooth profile switch).
-        // Some route changes emit AVAudioEngineConfigurationChange even when the freshly started
-        // engine is still healthy. handleConfigurationChange() only tears down when the system
-        // actually stopped the engine; otherwise it lets recording continue.
+        let formatValid = inputFormat.sampleRate > 0 && inputFormat.channelCount > 0
+        if formatValid {
+            guard let converter = AVAudioConverter(from: inputFormat, to: targetFormat) else {
+                AppDiagnostics.error(
+                    .audioRecorder,
+                    "recording start failed session=\(sessionID) converter creation failed inputFormat={\(Self.describe(format: inputFormat))} targetFormat={\(Self.describe(format: targetFormat))}"
+                )
+                cleanupAfterFailedStart(fileURL: fileURL)
+                throw AudioRecorderError.converterCreationFailed
+            }
+            installTap(on: inputNode, inputFormat: inputFormat, targetFormat: targetFormat, converter: converter, file: file)
+            AppDiagnostics.info(
+                .audioRecorder,
+                "recording start installed tap session=\(sessionID) inputFormat={\(Self.describe(format: inputFormat))} targetFormat={\(Self.describe(format: targetFormat))}"
+            )
+        } else {
+            AppDiagnostics.warning(
+                .audioRecorder,
+                "recording start input format not ready session=\(sessionID) inputFormat={\(Self.describe(format: inputFormat))} — waiting for config change"
+            )
+        }
+
+        do {
+            try engine.start()
+            AppDiagnostics.info(
+                .audioRecorder,
+                "engine started session=\(sessionID) tapInstalled=\(formatValid) file=\(fileURL.lastPathComponent) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
+            )
+        } catch {
+            AppDiagnostics.error(
+                .audioRecorder,
+                "engine failed to start session=\(sessionID) error=\(error.localizedDescription) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
+            )
+            if formatValid { inputNode.removeTap(onBus: 0) }
+            cleanupAfterFailedStart(fileURL: fileURL)
+            throw error
+        }
+
+        // Observe audio configuration changes. On config change we reinstall the tap
+        // with the current format — ignoring changes caused the tap to go dead (v1.11 bug).
         configObserver = NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange,
             object: engine,
@@ -178,7 +190,6 @@ final class AudioRecorder {
         }
 
         // Watchdog: if recording for 5s with essentially no audio, auto-stop and report.
-        // Catches the case where config change never fires (no recovery possible).
         noAudioWatchdog = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: false) { [weak self] _ in
             Task { @MainActor in
                 self?.checkNoAudioWatchdog()
@@ -188,8 +199,9 @@ final class AudioRecorder {
         return fileURL
     }
 
+    // MARK: - Tap management
+
     /// Installs the audio tap on the input node with the given format and converter.
-    /// Shared by startRecording() (initial install) and handleConfigurationChange() (recovery).
     private func installTap(
         on inputNode: AVAudioInputNode,
         inputFormat: AVAudioFormat,
@@ -237,36 +249,123 @@ final class AudioRecorder {
                     Self.logger.error("Failed to write audio buffer: \(error.localizedDescription)")
                 }
             } else if let error {
-                Self.logger.warning("Audio conversion failed: status=\(status.rawValue), error=\(error.localizedDescription)")
+                AppDiagnostics.warning(
+                    .audioRecorder,
+                    "audio conversion failed session=\(self.recordingSessionID ?? "none") status=\(status.rawValue) error=\(error.localizedDescription)"
+                )
             }
         }
     }
 
-    /// Audio config changed (Bluetooth profile switch, device disconnect, etc.).
-    /// Some devices emit this notification during startup/route settling without
-    /// actually stopping the engine. Only tear down when the engine is no longer
-    /// running; otherwise keep recording and let the watchdog catch true no-audio
-    /// failures.
+    /// Re-applies the built-in mic device override on the given input node.
+    private func applyDeviceOverride(inputNode: AVAudioInputNode) {
+        guard useBuiltInMic, let builtInID = AudioDeviceDiagnostics.findBuiltInMicDevice(), let audioUnit = inputNode.audioUnit else {
+            if useBuiltInMic {
+                AppDiagnostics.warning(
+                    .audioRecorder,
+                    "built-in mic override unavailable session=\(recordingSessionID ?? "none") route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
+                )
+            }
+            return
+        }
+        var deviceID = builtInID
+        let status = AudioUnitSetProperty(
+            audioUnit,
+            kAudioOutputUnitProperty_CurrentDevice,
+            kAudioUnitScope_Global,
+            0,
+            &deviceID,
+            UInt32(MemoryLayout<AudioDeviceID>.size)
+        )
+        if status == noErr {
+            AppDiagnostics.info(
+                .audioRecorder,
+                "built-in mic override applied session=\(recordingSessionID ?? "none") deviceID=\(builtInID) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
+            )
+        } else {
+            AppDiagnostics.warning(
+                .audioRecorder,
+                "built-in mic override failed session=\(recordingSessionID ?? "none") status=\(status) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
+            )
+        }
+    }
+
+    // MARK: - Config change handling
+
+    /// Hardware config changed (Bluetooth HFP settle, device disconnect, etc.).
+    ///
+    /// Two cases:
+    ///   - Engine still running: reinstall the tap with the current format. Config changes
+    ///     invalidate the tap even when the engine survives. Re-apply device override too.
+    ///   - Engine stopped: HFP killed it. Tear down and let AppState retry.
     private func handleConfigurationChange() {
         guard isRecording else { return }
-
-        // Debounce: if we already handled a config change, ignore further ones.
-        // The forceReset below sets isRecording=false, but the notification can
-        // arrive multiple times before the main-actor dispatch processes them all.
         guard let engine = audioEngine else {
-            Self.logger.info("Config change ignored — engine already torn down")
+            AppDiagnostics.info(
+                .audioRecorder,
+                "config change ignored session=\(recordingSessionID ?? "none") — engine already torn down"
+            )
             return
         }
 
-        guard !engine.isRunning else {
-            Self.logger.info("Config change received but engine is still running — ignoring transient route-settle notification")
+        let frames = _framesWritten.withLock { $0 }
+        let dropped = _droppedFrames.withLock { $0 }
+        let elapsed = elapsedRecordingTime()
+        AppDiagnostics.warning(
+            .audioRecorder,
+            "config change received session=\(recordingSessionID ?? "none") engineRunning=\(engine.isRunning) elapsed=\(elapsed) frames=\(frames) dropped=\(dropped) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
+        )
+
+        if engine.isRunning {
+            guard let targetFormat = activeTargetFormat, let file = outputFile else {
+                AppDiagnostics.warning(
+                    .audioRecorder,
+                    "config change running session=\(recordingSessionID ?? "none") missing target format or file — cannot reinstall tap"
+                )
+                return
+            }
+
+            let inputNode = engine.inputNode
+
+            // Remove the old (now-dead) tap
+            inputNode.removeTap(onBus: 0)
+
+            // Re-apply device override — config changes can reset it
+            applyDeviceOverride(inputNode: inputNode)
+
+            let newFormat = inputNode.outputFormat(forBus: 0)
+            if newFormat.sampleRate > 0 && newFormat.channelCount > 0 {
+                if let converter = AVAudioConverter(from: newFormat, to: targetFormat) {
+                    installTap(on: inputNode, inputFormat: newFormat, targetFormat: targetFormat, converter: converter, file: file)
+                    AppDiagnostics.info(
+                        .audioRecorder,
+                        "config change tap reinstalled session=\(recordingSessionID ?? "none") newInputFormat={\(Self.describe(format: newFormat))} targetFormat={\(Self.describe(format: targetFormat))}"
+                    )
+                } else {
+                    AppDiagnostics.warning(
+                        .audioRecorder,
+                        "config change converter creation failed session=\(recordingSessionID ?? "none") newInputFormat={\(Self.describe(format: newFormat))}"
+                    )
+                }
+            } else {
+                AppDiagnostics.warning(
+                    .audioRecorder,
+                    "config change format still invalid session=\(recordingSessionID ?? "none") newInputFormat={\(Self.describe(format: newFormat))} — waiting for next change"
+                )
+            }
             return
         }
 
-        Self.logger.warning("Audio configuration changed during recording and engine stopped — tearing down for fresh start")
-        forceReset()
+        // Engine stopped by the system (HFP negotiate, device disconnect, etc.)
+        AppDiagnostics.warning(
+            .audioRecorder,
+            "config change engine stopped session=\(recordingSessionID ?? "none") — force resetting for reconnect"
+        )
+        forceReset(reason: "config change while engine stopped")
         onRecordingFailed?("Audio device changed. Reconnecting...")
     }
+
+    // MARK: - Lifecycle
 
     /// Delay ARC deallocation after an engine stop/system stop. Releasing immediately can
     /// crash if CoreAudio still has in-flight blocks on its internal dispatch queues.
@@ -286,13 +385,11 @@ final class AudioRecorder {
 
     func stopRecording() -> (url: URL, duration: TimeInterval, framesWritten: Int64)? {
         guard isRecording, let url = outputURL else { return nil }
+        let sessionID = recordingSessionID ?? "none"
 
-        // Signal the tap callback to stop writing BEFORE tearing down the engine.
-        // This prevents the tap from writing with invalid buffers after engine stop.
         _isCapturing.withLock { $0 = false }
         isRecording = false
 
-        // Remove config change observer
         if let observer = configObserver {
             NotificationCenter.default.removeObserver(observer)
             configObserver = nil
@@ -304,7 +401,6 @@ final class AudioRecorder {
         noAudioWatchdog?.invalidate()
         noAudioWatchdog = nil
 
-        // Compute final duration from monotonic clock for accuracy (timer is up to 100ms stale)
         let duration: TimeInterval
         if let start = recordingStartTime {
             duration = ProcessInfo.processInfo.systemUptime - start
@@ -326,17 +422,26 @@ final class AudioRecorder {
         }
         outputFile = nil
         recordingStartTime = nil
+        activeTargetFormat = nil
 
-        Self.logger.info("Recording stopped: \(frames) frames written, \(dropped) frames dropped, \(String(format: "%.1f", duration))s duration")
+        AppDiagnostics.info(
+            .audioRecorder,
+            "recording stopped session=\(sessionID) duration=\(String(format: "%.3f", duration))s frames=\(frames) dropped=\(dropped) file=\(url.lastPathComponent) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
+        )
+        recordingSessionID = nil
 
         return (url, duration, frames)
     }
 
-    /// Unconditionally resets all recording state. Use when the recorder is stuck
-    /// in a bad state (engine dead, config change loop, etc.) and normal stopRecording()
-    /// can't recover. Does NOT return the recording — the audio is lost.
-    func forceReset() {
-        Self.logger.warning("Force-resetting audio recorder — cleaning up all state")
+    /// Unconditionally resets all recording state. Does NOT return the recording.
+    func forceReset(reason: String = "unspecified") {
+        let sessionID = recordingSessionID ?? "none"
+        let frames = _framesWritten.withLock { $0 }
+        let dropped = _droppedFrames.withLock { $0 }
+        AppDiagnostics.warning(
+            .audioRecorder,
+            "force reset session=\(sessionID) reason=\(reason) elapsed=\(elapsedRecordingTime()) frames=\(frames) dropped=\(dropped) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
+        )
         _isCapturing.withLock { $0 = false }
 
         if let observer = configObserver {
@@ -350,10 +455,6 @@ final class AudioRecorder {
         noAudioWatchdog?.invalidate()
         noAudioWatchdog = nil
 
-        // If the engine is still running, stop it cleanly (remove tap, then stop).
-        // If it was stopped by the system (AVAudioEngineConfigurationChange), do NOT
-        // access inputNode — the underlying HAL device may be in an inconsistent state.
-        //
         if let engine = audioEngine {
             if engine.isRunning {
                 engine.inputNode.removeTap(onBus: 0)
@@ -365,87 +466,62 @@ final class AudioRecorder {
         }
         outputFile = nil
         recordingStartTime = nil
+        activeTargetFormat = nil
         isRecording = false
         recordingDuration = 0
+        recordingSessionID = nil
 
-        // Clean up temp file — audio is lost anyway
         if let url = outputURL {
             try? FileManager.default.removeItem(at: url)
             outputURL = nil
         }
     }
 
+    private func cleanupAfterFailedStart(fileURL: URL) {
+        AppDiagnostics.warning(
+            .audioRecorder,
+            "cleanup after failed start session=\(recordingSessionID ?? "none") file=\(fileURL.lastPathComponent)"
+        )
+        self._isCapturing.withLock { $0 = false }
+        self.audioEngine = nil
+        self.outputFile = nil
+        self.outputURL = nil
+        self.activeTargetFormat = nil
+        self.isRecording = false
+        self.recordingDuration = 0
+        self.recordingStartTime = nil
+        self.recordingSessionID = nil
+        try? FileManager.default.removeItem(at: fileURL)
+    }
+
     private func checkNoAudioWatchdog() {
         guard isRecording else { return }
         let frames = _framesWritten.withLock { $0 }
         if frames < 800 {
-            Self.logger.error("Watchdog: recording for 5s with only \(frames) frames — auto-stopping")
+            AppDiagnostics.error(
+                .audioRecorder,
+                "watchdog fired session=\(recordingSessionID ?? "none") frames=\(frames) dropped=\(_droppedFrames.withLock { $0 }) elapsed=\(elapsedRecordingTime()) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
+            )
             let message = "No audio captured after 5 seconds. Check your microphone or try reconnecting your headphones."
-            forceReset()
+            forceReset(reason: "watchdog no audio after 5 seconds")
             onRecordingFailed?(message)
         } else {
-            Self.logger.info("Watchdog: \(frames) frames captured — recording healthy")
+            AppDiagnostics.info(
+                .audioRecorder,
+                "watchdog healthy session=\(recordingSessionID ?? "none") frames=\(frames) dropped=\(_droppedFrames.withLock { $0 }) elapsed=\(elapsedRecordingTime())"
+            )
             onRecordingStable?()
         }
     }
 
-    // MARK: - Core Audio device enumeration
+    private func elapsedRecordingTime() -> String {
+        guard let start = recordingStartTime else { return "unknown" }
+        return String(format: "%.3fs", ProcessInfo.processInfo.systemUptime - start)
+    }
 
-    /// Finds the built-in microphone device ID by scanning all audio devices
-    /// for one with transport type kAudioDeviceTransportTypeBuiltIn and input channels.
-    private static func findBuiltInMicDevice() -> AudioDeviceID? {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDevices,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-
-        var dataSize: UInt32 = 0
-        guard AudioObjectGetPropertyDataSize(
-            AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &dataSize
-        ) == noErr else { return nil }
-
-        let deviceCount = Int(dataSize) / MemoryLayout<AudioDeviceID>.size
-        var devices = [AudioDeviceID](repeating: 0, count: deviceCount)
-        guard AudioObjectGetPropertyData(
-            AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &dataSize, &devices
-        ) == noErr else { return nil }
-
-        for device in devices {
-            // Check transport type
-            var transportType: UInt32 = 0
-            var size = UInt32(MemoryLayout<UInt32>.size)
-            var transportAddr = AudioObjectPropertyAddress(
-                mSelector: kAudioDevicePropertyTransportType,
-                mScope: kAudioObjectPropertyScopeGlobal,
-                mElement: kAudioObjectPropertyElementMain
-            )
-            guard AudioObjectGetPropertyData(device, &transportAddr, 0, nil, &size, &transportType) == noErr,
-                  transportType == kAudioDeviceTransportTypeBuiltIn else { continue }
-
-            // Check if it has input channels
-            var inputAddr = AudioObjectPropertyAddress(
-                mSelector: kAudioDevicePropertyStreamConfiguration,
-                mScope: kAudioObjectPropertyScopeInput,
-                mElement: kAudioObjectPropertyElementMain
-            )
-            var bufferListSize: UInt32 = 0
-            guard AudioObjectGetPropertyDataSize(device, &inputAddr, 0, nil, &bufferListSize) == noErr,
-                  bufferListSize > 0 else { continue }
-
-            let bufferListPtr = UnsafeMutablePointer<AudioBufferList>.allocate(capacity: 1)
-            defer { bufferListPtr.deallocate() }
-            guard AudioObjectGetPropertyData(device, &inputAddr, 0, nil, &bufferListSize, bufferListPtr) == noErr else { continue }
-
-            let channelCount = bufferListPtr.pointee.mBuffers.mNumberChannels
-            if channelCount > 0 {
-                logger.info("Found built-in mic: deviceID=\(device), channels=\(channelCount)")
-                return device
-            }
-        }
-
-        logger.warning("No built-in microphone found")
-        return nil
+    private static func describe(format: AVAudioFormat) -> String {
+        let sampleRate = String(format: "%.1f", format.sampleRate)
+        return "\(sampleRate)Hz/\(format.channelCount)ch/commonFormat=\(format.commonFormat.rawValue)"
     }
 }
 

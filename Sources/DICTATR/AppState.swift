@@ -123,9 +123,15 @@ final class AppState {
             self.databaseManager = try DatabaseManager()
         } catch {
             print("Failed to initialize database: \(error)")
+            AppDiagnostics.error(.appState, "Database initialization failed error=\(error.localizedDescription)")
             self.databaseManager = nil
             self.errorMessage = "History unavailable: database failed to load."
         }
+
+        AppDiagnostics.info(
+            .appState,
+            "AppState initialized \(AppDiagnostics.runtimeSummary) autoPasteEnabled=\(autoPasteEnabled) retentionCount=\(retentionCount) onboardingComplete=\(hasCompletedOnboarding) databaseAvailable=\(databaseManager != nil) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
+        )
 
         // Wire up auto-stop callback from AudioRecorder (watchdog timeout, engine failure)
         audioRecorder.onRecordingFailed = { [weak self] message in
@@ -138,7 +144,10 @@ final class AppState {
         audioRecorder.onRecordingStable = { [weak self] in
             guard let self else { return }
             if self.autoRetryCount > 0 {
-                Self.logger.info("Recording stable — resetting retry counter")
+                AppDiagnostics.info(
+                    .appState,
+                    "Recording stable — resetting retry counter from \(self.autoRetryCount) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
+                )
                 self.autoRetryCount = 0
             }
         }
@@ -154,16 +163,8 @@ final class AppState {
         // The closure checks isModelLoaded before transcribing — requests that arrive
         // before the model is ready get a 500 "model not loaded" response.
         httpServer = LocalHTTPServer { [weak self] url in
-            // Hop to MainActor to check model state and call transcribe().
-            // TranscriptionEngine is @MainActor-isolated; the actual WhisperKit work
-            // happens on a background thread internally.
-            let engine: TranscriptionEngine = try await MainActor.run {
-                guard let self else { throw TranscriptionError.modelNotLoaded }
-                guard self.transcriptionEngine.isModelLoaded else {
-                    throw TranscriptionError.modelNotLoaded
-                }
-                return self.transcriptionEngine
-            }
+            guard let self else { throw TranscriptionError.modelNotLoaded }
+            let engine = try await self.httpTranscriptionEngine()
             return try await engine.transcribe(audioURL: url)
         }
         httpServer?.start()
@@ -179,20 +180,27 @@ final class AppState {
         modelLoadTask = Task { [weak self] in
             guard let self else { return }
             do {
+                AppDiagnostics.info(.appState, "Model load started")
                 self.statusMessage = "Loading model..."
                 try await self.transcriptionEngine.loadModel()
                 if Task.isCancelled { return }
                 self.statusMessage = "Ready"
                 self.errorMessage = nil
+                AppDiagnostics.info(.appState, "Model load completed successfully")
             } catch {
                 if Task.isCancelled { return }
                 self.statusMessage = "Model load failed"
                 self.errorMessage = "Download failed: \(error.localizedDescription)"
+                AppDiagnostics.error(.appState, "Model load failed error=\(error.localizedDescription)")
             }
         }
     }
 
     func toggleRecording() {
+        AppDiagnostics.info(
+            .appState,
+            "toggleRecording currentState=\(String(describing: currentState)) retryCount=\(autoRetryCount) recoveryPending=\(recordingRecoveryPending) useBuiltInMic=\(audioRecorder.useBuiltInMic)"
+        )
         switch currentState {
         case .idle:
             autoRetryCount = 0
@@ -211,9 +219,14 @@ final class AppState {
     private func startRecording() {
         guard transcriptionEngine.isModelLoaded else {
             errorMessage = "Model is still loading. Please wait."
+            AppDiagnostics.warning(.appState, "startRecording blocked because model is still loading")
             return
         }
 
+        AppDiagnostics.info(
+            .appState,
+            "startRecording requested retryCount=\(autoRetryCount) useBuiltInMic=\(audioRecorder.useBuiltInMic) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
+        )
         do {
             let url = try audioRecorder.startRecording()
             currentState = .recording
@@ -221,12 +234,18 @@ final class AppState {
             errorMessage = nil
             NSSound(named: .init("Tink"))?.play()
             recordingIndicator.show(audioRecorder: audioRecorder)
-            Self.logger.info("Recording started → \(url.lastPathComponent)")
+            AppDiagnostics.info(
+                .appState,
+                "recording started session=\(audioRecorder.recordingSessionID ?? "none") file=\(url.lastPathComponent) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
+            )
         } catch {
             currentState = .idle
             statusMessage = "Ready"
             errorMessage = "Failed to start recording: \(error.localizedDescription)"
-            Self.logger.error("Recording failed to start: \(error.localizedDescription)")
+            AppDiagnostics.error(
+                .appState,
+                "recording failed to start error=\(error.localizedDescription) useBuiltInMic=\(audioRecorder.useBuiltInMic) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
+            )
         }
     }
 
@@ -238,15 +257,24 @@ final class AppState {
     // route-churn messages, not by rebooting the Mac (apps can't).
     private func handleRecordingFailure(message: String) {
         if recordingRecoveryPending {
-            Self.logger.info("Ignoring duplicate recording failure while recovery already scheduled (HFP burst coalescing)")
+            AppDiagnostics.warning(
+                .appState,
+                "Ignoring duplicate recording failure while recovery already scheduled message=\(message) retryCount=\(autoRetryCount) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
+            )
             return
         }
 
-        Self.logger.error("Recording auto-stopped: \(message)")
+        AppDiagnostics.error(
+            .appState,
+            "Recording auto-stopped session=\(audioRecorder.recordingSessionID ?? "none") message=\(message) retryCountBeforeIncrement=\(autoRetryCount) useBuiltInMic=\(audioRecorder.useBuiltInMic) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
+        )
         autoRetryCount += 1
 
         if autoRetryCount > 3 {
-            Self.logger.error("Exceeded max retries (\(self.autoRetryCount)) — giving up")
+            AppDiagnostics.error(
+                .appState,
+                "Exceeded max retries retryCount=\(self.autoRetryCount) route=\(AudioDeviceDiagnostics.currentRouteSnapshot()) availableDevices=\(AudioDeviceDiagnostics.availableDevicesSnapshot())"
+            )
             recordingRecoveryPending = false
             autoRetryTask?.cancel()
             currentState = .idle
@@ -259,7 +287,10 @@ final class AppState {
         let delaySeconds = Self.delayBeforeReconnectAttempt(message: message, attempt: autoRetryCount)
 
         if autoRetryCount == 1 {
-            Self.logger.info("Scheduling retry in \(String(format: "%.1f", delaySeconds))s with default device...")
+            AppDiagnostics.warning(
+                .appState,
+                "Scheduling retry with default device delay=\(String(format: "%.1f", delaySeconds))s retryCount=\(autoRetryCount) message=\(message) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
+            )
             currentState = .idle
             statusMessage = "Reconnecting..."
             recordingIndicator.showReconnecting()
@@ -271,13 +302,17 @@ final class AppState {
                 guard let self else { return }
                 guard !Task.isCancelled, self.currentState == .idle else {
                     self.recordingRecoveryPending = false
+                    AppDiagnostics.info(.appState, "Default-device retry cancelled before execution")
                     return
                 }
                 self.recordingRecoveryPending = false
                 self.retryStartRecording()
             }
         } else {
-            Self.logger.info("Default device failed \(self.autoRetryCount) times — falling back to built-in mic")
+            AppDiagnostics.warning(
+                .appState,
+                "Falling back to built-in mic retryCount=\(self.autoRetryCount) delay=\(String(format: "%.1f", delaySeconds))s message=\(message) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
+            )
             audioRecorder.useBuiltInMic = true
             currentState = .idle
             statusMessage = "Using MacBook mic..."
@@ -290,6 +325,7 @@ final class AppState {
                 guard let self else { return }
                 guard !Task.isCancelled, self.currentState == .idle else {
                     self.recordingRecoveryPending = false
+                    AppDiagnostics.info(.appState, "Built-in mic retry cancelled before execution")
                     return
                 }
                 self.recordingRecoveryPending = false
@@ -314,6 +350,10 @@ final class AppState {
 
     private func retryStartRecording() {
         guard transcriptionEngine.isModelLoaded else { return }
+        AppDiagnostics.info(
+            .appState,
+            "retryStartRecording retryCount=\(autoRetryCount) useBuiltInMic=\(audioRecorder.useBuiltInMic) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
+        )
 
         do {
             let url = try audioRecorder.startRecording()
@@ -321,9 +361,15 @@ final class AppState {
             statusMessage = audioRecorder.useBuiltInMic ? "Recording (MacBook mic)..." : "Recording..."
             errorMessage = nil
             recordingIndicator.show(audioRecorder: audioRecorder)
-            Self.logger.info("Retry succeeded → \(url.lastPathComponent) (builtInMic=\(self.audioRecorder.useBuiltInMic))")
+            AppDiagnostics.info(
+                .appState,
+                "retry succeeded session=\(audioRecorder.recordingSessionID ?? "none") file=\(url.lastPathComponent) builtInMic=\(self.audioRecorder.useBuiltInMic) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
+            )
         } catch {
-            Self.logger.error("Retry failed: \(error.localizedDescription)")
+            AppDiagnostics.error(
+                .appState,
+                "retry failed error=\(error.localizedDescription) retryCount=\(autoRetryCount) builtInMic=\(audioRecorder.useBuiltInMic) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
+            )
             if !audioRecorder.useBuiltInMic {
                 // First retry with default device failed to even start — go straight to built-in
                 handleRecordingFailure(message: error.localizedDescription)
@@ -337,24 +383,45 @@ final class AppState {
         }
     }
 
+    private func httpTranscriptionEngine() throws -> TranscriptionEngine {
+        guard transcriptionEngine.isModelLoaded else {
+            throw TranscriptionError.modelNotLoaded
+        }
+        return transcriptionEngine
+    }
+
     private func stopRecordingAndTranscribe() {
+        let sessionID = audioRecorder.recordingSessionID ?? "none"
+        AppDiagnostics.info(
+            .appState,
+            "stopRecordingAndTranscribe requested session=\(sessionID) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
+        )
         NSSound(named: .init("Pop"))?.play()
         guard let result = audioRecorder.stopRecording() else {
             // Reset to idle if stop fails — force-reset ensures full cleanup
-            Self.logger.error("stopRecording() returned nil — force-resetting recorder")
-            audioRecorder.forceReset()
+            AppDiagnostics.error(
+                .appState,
+                "stopRecording returned nil session=\(sessionID) — force resetting recorder"
+            )
+            audioRecorder.forceReset(reason: "AppState stopRecordingAndTranscribe nil result")
             recordingIndicator.hide()
             currentState = .idle
             statusMessage = "Recording failed"
             return
         }
 
-        Self.logger.info("Recording stopped: \(String(format: "%.1f", result.duration))s, \(result.framesWritten) frames, file=\(result.url.lastPathComponent)")
+        AppDiagnostics.info(
+            .appState,
+            "recording stopped session=\(sessionID) duration=\(String(format: "%.3f", result.duration))s frames=\(result.framesWritten) file=\(result.url.lastPathComponent)"
+        )
 
         // Skip transcription for empty or trivially short recordings
         let fileSize = (try? FileManager.default.attributesOfItem(atPath: result.url.path)[.size] as? Int) ?? 0
         if result.duration < 0.3 || fileSize < 1000 {
-            Self.logger.info("Recording too short (duration=\(String(format: "%.2f", result.duration))s, fileSize=\(fileSize)B) — skipping transcription")
+            AppDiagnostics.info(
+                .appState,
+                "recording too short session=\(sessionID) duration=\(String(format: "%.3f", result.duration))s fileSize=\(fileSize)B — skipping transcription"
+            )
             recordingIndicator.hide()
             statusMessage = "Recording too short"
             currentState = .idle
@@ -364,7 +431,10 @@ final class AppState {
 
         // Detect hardware/driver issues where recording ran but no audio was captured
         if result.framesWritten < 800 { // ~50ms at 16kHz
-            Self.logger.warning("No audio captured: \(result.framesWritten) frames written in \(String(format: "%.1f", result.duration))s — likely mic/Bluetooth issue")
+            AppDiagnostics.warning(
+                .appState,
+                "no audio captured session=\(sessionID) frames=\(result.framesWritten) duration=\(String(format: "%.3f", result.duration))s fileSize=\(fileSize)B route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
+            )
             recordingIndicator.hide()
             statusMessage = "No audio captured. Check your microphone."
             currentState = .idle
@@ -386,6 +456,10 @@ final class AppState {
                     return
                 }
                 let text = try await self.transcriptionEngine.transcribe(audioURL: result.url)
+                AppDiagnostics.info(
+                    .appState,
+                    "transcription returned session=\(sessionID) chars=\(text.count) file=\(result.url.lastPathComponent)"
+                )
 
                 guard !Task.isCancelled else {
                     try? FileManager.default.removeItem(at: result.url)
@@ -393,7 +467,7 @@ final class AppState {
                 }
 
                 if text.isEmpty {
-                    Self.logger.info("Transcription returned empty text — no speech detected")
+                    AppDiagnostics.info(.appState, "transcription returned empty text session=\(sessionID)")
                     self.recordingIndicator.hide()
                     self.statusMessage = "No speech detected"
                     self.currentState = .idle
@@ -401,12 +475,12 @@ final class AppState {
                     return
                 }
 
-                Self.logger.info("Transcription complete: \(text.count) chars")
+                AppDiagnostics.info(.appState, "transcription complete session=\(sessionID) chars=\(text.count)")
                 self.lastTranscription = text
 
                 // Paste to active app
                 let pasteResult = await PasteManager.paste(text: text, autoPaste: self.autoPasteEnabled)
-                Self.logger.info("Paste result: \(String(describing: pasteResult))")
+                AppDiagnostics.info(.appState, "paste result session=\(sessionID) result=\(String(describing: pasteResult))")
 
                 if pasteResult == .noAccessibility {
                     self.errorMessage = "Settings → search \"Privacy\" → Accessibility → toggle DICTATR on"
@@ -425,6 +499,7 @@ final class AppState {
                         try db.deleteOld(keepLast: self.retentionCount)
                     } catch {
                         self.errorMessage = "Failed to save to history: \(error.localizedDescription)"
+                        AppDiagnostics.error(.appState, "failed to save history session=\(sessionID) error=\(error.localizedDescription)")
                     }
                 }
 
@@ -443,7 +518,7 @@ final class AppState {
                 // Clean up temp audio file on failure
                 try? FileManager.default.removeItem(at: result.url)
                 guard let self else { return }
-                Self.logger.error("Transcription failed: \(error.localizedDescription)")
+                AppDiagnostics.error(.appState, "transcription failed session=\(sessionID) error=\(error.localizedDescription)")
                 self.recordingIndicator.hide()
                 self.errorMessage = "Transcription failed: \(error.localizedDescription)"
                 self.statusMessage = "Error"

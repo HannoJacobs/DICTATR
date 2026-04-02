@@ -2,6 +2,7 @@ import SwiftUI
 
 @main
 struct DICTATRApp: App {
+    @NSApplicationDelegateAdaptor(DICTATRAppDelegate.self) private var appDelegate
     @State private var appState = AppState()
 
     var body: some Scene {
