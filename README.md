@@ -49,9 +49,11 @@ Everything is orchestrated by `AppState`, a central `@Observable @MainActor` cla
 4. Grant **Microphone** permission when prompted
 5. Grant **Accessibility** in System Settings → Privacy & Security → Accessibility
 
-On first launch the WhisperKit model downloads (~500MB–1GB). After an install, update,
-or cache reset, the first CoreML/Apple Neural Engine compile can also take several
-minutes even when the model files are already present.
+On first launch the WhisperKit model downloads. DICTATR now prefers a faster English-only
+model on the affected M1 Mac class instead of WhisperKit's heavier large-v3 default, because
+that default was taking multiple minutes to compile after installs and cache resets.
+After an install, update, or cache reset, the first CoreML/Apple Neural Engine compile can
+still take time, but it should no longer block behind the slowest known default path on this Mac.
 
 ---
 
@@ -151,6 +153,7 @@ latest.log
 ```
 
 What gets logged:
+- Model policy selection, including the effective variant, the WhisperKit default, and the reason for any reliability override
 - App launch / reopen with version, build, PID, macOS build, hardware model, bundle path, and diagnostics file path
 - Model startup with selected WhisperKit variant, resolved model folder, compiled-cache snapshot, download milestones, per-phase timings, and long-load heartbeats
 - Full audio device inventory at launch
@@ -169,7 +172,8 @@ rg -n "watchdog|config change|retry|force reset|built-in mic|recording start" ~/
 ```
 
 If the app keeps relaunching into `Compiling on-device model...` for multiple minutes,
-treat that as a compiled-cache incident first, not a missing-model incident.
+check the logged `effectiveVariant` first. A repeated stall on the old large-v3 default is
+now a model-policy bug; a repeated stall on the selected variant is a compiled-cache incident.
 
 Immediate recovery:
 

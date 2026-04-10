@@ -4,6 +4,7 @@
 
 Observed behavior:
 - `DICTATR` launched normally.
+- WhisperKit's default M1 model was `openai_whisper-large-v3-v20240930_626MB`.
 - The local WhisperKit model folder was found immediately.
 - `TranscriptionEngine` entered `Compiling on-device model...`.
 - Warm-cache heartbeats continued for multiple minutes and never converged into the normal 1-3 second warm start seen in earlier logs.
@@ -12,6 +13,13 @@ The strongest evidence was:
 - Launch session `7df24c11` on 2026-04-10 stayed in `Compiling on-device model...` while `compiledCache exists=yes`.
 - Live process samples showed the work inside Apple's CoreML / AppleNeuralEngine compilation stack, not in app UI code.
 - Clearing `~/Library/Caches/com.hannojacobs.DICTATR/com.apple.e5rt.e5bundlecache` changed the behavior from an obviously bad warm launch into a cold recompile, which confirms the incident is tied to the compiled ANE cache path.
+- A later cold compile of that same variant still took just over 6 minutes, which means the package default itself was operationally too slow for DICTATR on this Mac even when recovery worked.
+
+## Current Policy
+
+- DICTATR now logs both `effectiveVariant` and `whisperKitDefault` during model selection.
+- On the affected M1 Mac class, DICTATR overrides WhisperKit's `openai_whisper-large-v3-v20240930_626MB` default and uses `openai_whisper-small.en` instead.
+- Treat any future reappearance of the old large-v3 default on this machine as a model-selection regression first, not just a cache incident.
 
 ## Fast Triage
 
@@ -24,10 +32,11 @@ tail -n 80 ~/Library/Application\ Support/DICTATR/Logs/latest.log
 2. Confirm whether the failure is a warm-cache compile stall:
 
 ```bash
-rg -n "CoreML load started|Model load still running|Model load completed|compiledCache" ~/Library/Application\ Support/DICTATR/Logs/latest.log
+rg -n "Model variant selected|CoreML load started|Model load still running|Model load completed|compiledCache" ~/Library/Application\ Support/DICTATR/Logs/latest.log
 ```
 
 Treat it as a compiled-cache incident when:
+- The logged `effectiveVariant` matches the current policy for this machine.
 - The model folder is already local.
 - `compiledCache exists=yes`.
 - The app stays in `Compiling on-device model...` for much longer than the normal warm path.
@@ -50,6 +59,7 @@ tail -f ~/Library/Application\ Support/DICTATR/Logs/latest.log
 ```
 
 What to expect:
+- The next launch should log `Model variant selected ...`.
 - The next launch should log `compiledCache=missing` before compile begins.
 - The app will do a cold ANE compile again, which may still take several minutes.
 - A healthy warm cache should make later launches fast again.

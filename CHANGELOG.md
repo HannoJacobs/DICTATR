@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.20
+- Stopped trusting WhisperKit's heavy `openai_whisper-large-v3-v20240930_626MB` default on the affected M1 Mac class and now prefer `openai_whisper-small.en` there for startup reliability.
+- Added explicit diagnostics for the effective model variant, the WhisperKit default it replaced, and the selection reason so future startup incidents can distinguish a policy choice from a package default.
+- Removed the fake `large-v3-turbo` settings placeholder and replaced it with truthful model-policy status in the Settings panel.
+- Fixed the menu error action so `Retry Model Load` only appears when a real model retry can happen, instead of offering a misleading retry while a compile is already in flight.
+
 ## 1.19
 - Added persistent model-load recovery tracking under `~/Library/Application Support/DICTATR/Diagnostics/model-load-recovery.json` so an interrupted compile can be detected on the next launch instead of looking like an unexplained repeat failure.
 - Any interrupted model compile now clears the compiled ANE cache on the next launch, including the case where the previous launch was the first cold compile after a cache reset.

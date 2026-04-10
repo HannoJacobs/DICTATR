@@ -162,10 +162,9 @@ struct MenuBarView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Spacer()
-                    if appState.currentState == .idle {
-                        Button("Try Again") {
-                            appState.errorMessage = nil
-                            appState.toggleRecording()
+                    if appState.currentState == .idle, !appState.isModelLoading, !appState.isModelLoaded {
+                        Button("Retry Model Load") {
+                            appState.retryModelLoad()
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.mini)

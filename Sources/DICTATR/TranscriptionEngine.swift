@@ -7,9 +7,8 @@
 //   Phase 1 — WhisperKit.download(variant:progressCallback:)
 //     Downloads model weights from HuggingFace Hub to the system cache.
 //     If already cached, completes instantly (milliseconds, no network).
-//     Uses recommendedModels().default — auto-selects the right size for this device.
-//     DO NOT hardcode a variant like "openai_whisper-large-v3_turbo"; it ignores hardware
-//     capabilities and may download a model that's too large/slow for the machine.
+//     Starts from WhisperKit's recommended model table, but DICTATR can override the
+//     default when a "supported" model is still operationally too slow for this app.
 //
 //   Phase 2 — WhisperKit(WhisperKitConfig(modelFolder:, load: true, download: false))
 //     Loads the cached weights into Core ML / Apple Neural Engine memory.
@@ -34,6 +33,12 @@ import WhisperKit
 @Observable
 @MainActor
 final class TranscriptionEngine {
+    private struct ModelSelection {
+        let variant: String
+        let whisperKitDefault: String
+        let reason: String
+    }
+
     private struct ModelLoadRecoveryState: Codable {
         let variant: String
         let stage: String
@@ -52,12 +57,16 @@ final class TranscriptionEngine {
     }
 
     private static let compileWarningThreshold: TimeInterval = 90
+    private static let slowStartupDefaultVariant = "openai_whisper-large-v3-v20240930_626MB"
+    private static let reliabilityFallbackVariant = "openai_whisper-small.en"
 
     private(set) var isModelLoaded = false
     private(set) var isLoading = false
     private(set) var downloadProgress: Double = 0
     private(set) var loadingPhase: String = ""
     private(set) var loadingDetail: String = ""
+    private(set) var configuredModelVariant = "Selecting model..."
+    private(set) var configuredModelPolicySummary = "Waiting for WhisperKit model selection."
 
     private var whisperKit: WhisperKit?
     private var loadHeartbeatTask: Task<Void, Never>?
@@ -78,9 +87,14 @@ final class TranscriptionEngine {
         nextDownloadLogThreshold = 0.1
 
         do {
-            // Use WhisperKit's recommended model for this device
-            let recommended = WhisperKit.recommendedModels()
-            let variant = recommended.default
+            let selection = Self.selectModel()
+            let variant = selection.variant
+            configuredModelVariant = variant
+            configuredModelPolicySummary = Self.modelPolicySummary(for: selection)
+            AppDiagnostics.info(
+                .transcriptionEngine,
+                "Model variant selected effectiveVariant=\(selection.variant) whisperKitDefault=\(selection.whisperKitDefault) reason=\(selection.reason)"
+            )
             Self.recoverFromInterruptedCompileIfNeeded(for: variant)
             let compiledCacheExistedAtStart = Self.compiledCacheExists()
             Self.persistModelLoadRecoveryState(
@@ -226,6 +240,33 @@ final class TranscriptionEngine {
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
         return text
+    }
+
+    private static func selectModel() -> ModelSelection {
+        let recommended = WhisperKit.recommendedModels()
+
+        if recommended.default == slowStartupDefaultVariant,
+           recommended.supported.contains(reliabilityFallbackVariant) {
+            return ModelSelection(
+                variant: reliabilityFallbackVariant,
+                whisperKitDefault: recommended.default,
+                reason: "reliability-override-slow-startup-default"
+            )
+        }
+
+        return ModelSelection(
+            variant: recommended.default,
+            whisperKitDefault: recommended.default,
+            reason: "whisperkit-default"
+        )
+    }
+
+    private static func modelPolicySummary(for selection: ModelSelection) -> String {
+        if selection.reason == "whisperkit-default" {
+            return "Using WhisperKit's recommended model for this Mac."
+        }
+
+        return "Using \(selection.variant) for faster startup because WhisperKit's \(selection.whisperKitDefault) default was too slow for DICTATR on this Mac class."
     }
 
     private func handleDownloadProgress(_ progress: Progress, variant: String) {

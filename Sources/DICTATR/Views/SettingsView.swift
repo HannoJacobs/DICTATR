@@ -55,11 +55,16 @@ struct GeneralSettingsView: View {
             }
 
             Section("Transcription") {
-                Picker("Model", selection: .constant("large-v3-turbo")) {
-                    Text("large-v3-turbo").tag("large-v3-turbo")
+                HStack {
+                    Text("Active Model:")
+                    Spacer()
+                    Text(appState.configuredModelVariant)
+                        .foregroundStyle(.secondary)
                 }
-                .disabled(true)
-                .help("Model selection will be available in a future update")
+
+                Text(appState.configuredModelPolicySummary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             Section("Behavior") {

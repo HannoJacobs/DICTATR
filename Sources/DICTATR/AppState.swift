@@ -107,6 +107,8 @@ final class AppState {
 
     var isModelLoaded: Bool { transcriptionEngine.isModelLoaded }
     var isModelLoading: Bool { transcriptionEngine.isLoading }
+    var configuredModelVariant: String { transcriptionEngine.configuredModelVariant }
+    var configuredModelPolicySummary: String { transcriptionEngine.configuredModelPolicySummary }
 
     init() {
         // Register defaults (idempotent, never overwrites explicit user choices)
@@ -194,6 +196,19 @@ final class AppState {
                 AppDiagnostics.error(.appState, "Model load failed error=\(error.localizedDescription)")
             }
         }
+    }
+
+    func retryModelLoad() {
+        guard !transcriptionEngine.isLoading else {
+            AppDiagnostics.warning(.appState, "retryModelLoad ignored because model load is already in progress")
+            errorMessage = "Model load is already in progress."
+            return
+        }
+
+        AppDiagnostics.info(.appState, "retryModelLoad requested")
+        errorMessage = nil
+        statusMessage = "Loading model..."
+        startModelDownload()
     }
 
     func toggleRecording() {
