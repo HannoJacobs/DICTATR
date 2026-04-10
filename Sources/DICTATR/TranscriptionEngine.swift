@@ -21,18 +21,38 @@
 //   may show only ~95MB RSS while the full model is loaded. This is normal. Nothing is
 //   sent to the cloud — WhisperKit is 100% on-device.
 //
-// OBSERVABLE PROPERTIES (used by ModelDownloadView for progress UI):
+// OBSERVABLE PROPERTIES (used by the menu status UI for progress state):
 //   downloadProgress: 0.0–1.0 during phase 1, then 1.0 during phase 2
 //   loadingPhase: "Downloading model..." / "Loading model..." / "" (done)
 //   isLoading: true while either phase is in progress
 //   isModelLoaded: true once the pipeline is fully ready to transcribe
 
+import Darwin
 import Foundation
 import WhisperKit
 
 @Observable
 @MainActor
 final class TranscriptionEngine {
+    private struct ModelLoadRecoveryState: Codable {
+        let variant: String
+        let stage: String
+        let launchSessionID: String
+        let startedAt: Date
+        let updatedAt: Date
+        let osBuild: String
+        let compiledCacheExistedAtStart: Bool
+    }
+
+    private enum ModelLoadStage {
+        static let selecting = "selecting"
+        static let checkingModelFiles = "checking-model-files"
+        static let usingCachedModelFiles = "using-cached-model-files"
+        static let compiling = "compiling"
+    }
+
+    private static let compileWarningThreshold: TimeInterval = 90
+
     private(set) var isModelLoaded = false
     private(set) var isLoading = false
     private(set) var downloadProgress: Double = 0
@@ -42,6 +62,7 @@ final class TranscriptionEngine {
     private var whisperKit: WhisperKit?
     private var loadHeartbeatTask: Task<Void, Never>?
     private var nextDownloadLogThreshold: Double = 0.1
+    private var hasLoggedWarmCompileWarning = false
 
     func loadModel() async throws {
         guard !isLoading else {
@@ -60,7 +81,19 @@ final class TranscriptionEngine {
             // Use WhisperKit's recommended model for this device
             let recommended = WhisperKit.recommendedModels()
             let variant = recommended.default
-            startLoadHeartbeat(variant: variant, startedAt: loadStartedAt)
+            Self.recoverFromInterruptedCompileIfNeeded(for: variant)
+            let compiledCacheExistedAtStart = Self.compiledCacheExists()
+            Self.persistModelLoadRecoveryState(
+                variant: variant,
+                stage: ModelLoadStage.selecting,
+                startedAt: loadStartedAt,
+                compiledCacheExistedAtStart: compiledCacheExistedAtStart
+            )
+            startLoadHeartbeat(
+                variant: variant,
+                startedAt: loadStartedAt,
+                compiledCacheExistedAtStart: compiledCacheExistedAtStart
+            )
             defer { stopLoadHeartbeat() }
 
             AppDiagnostics.info(
@@ -76,6 +109,12 @@ final class TranscriptionEngine {
                 loadingPhase = "Using cached model files..."
                 loadingDetail = "Using cached WhisperKit files for \(variant)."
                 downloadProgress = 1.0
+                Self.persistModelLoadRecoveryState(
+                    variant: variant,
+                    stage: ModelLoadStage.usingCachedModelFiles,
+                    startedAt: loadStartedAt,
+                    compiledCacheExistedAtStart: compiledCacheExistedAtStart
+                )
                 modelFolder = cachedModelFolder
                 AppDiagnostics.info(
                     .transcriptionEngine,
@@ -85,6 +124,12 @@ final class TranscriptionEngine {
                 let downloadStartedAt = Date()
                 loadingPhase = "Checking model files..."
                 loadingDetail = "Checking cached WhisperKit files for \(variant)."
+                Self.persistModelLoadRecoveryState(
+                    variant: variant,
+                    stage: ModelLoadStage.checkingModelFiles,
+                    startedAt: loadStartedAt,
+                    compiledCacheExistedAtStart: compiledCacheExistedAtStart
+                )
                 modelFolder = try await WhisperKit.download(
                     variant: variant,
                     progressCallback: { [weak self] progress in
@@ -111,6 +156,12 @@ final class TranscriptionEngine {
             loadingPhase = "Compiling on-device model..."
             loadingDetail = "Compiling \(variant) for Apple Neural Engine. After an install, update, or cache reset this can take several minutes."
             downloadProgress = 1.0
+            Self.persistModelLoadRecoveryState(
+                variant: variant,
+                stage: ModelLoadStage.compiling,
+                startedAt: loadStartedAt,
+                compiledCacheExistedAtStart: compiledCacheExistedAtStart
+            )
             AppDiagnostics.info(
                 .transcriptionEngine,
                 "CoreML load started variant=\(variant) folder=\(modelFolder.path) compiledCache=\(Self.compiledCacheSummary())"
@@ -141,6 +192,7 @@ final class TranscriptionEngine {
             } else {
                 AppDiagnostics.info(.transcriptionEngine, completionMessage)
             }
+            Self.clearModelLoadRecoveryState()
             resetLoadingState()
         } catch {
             let elapsed = Date().timeIntervalSince(loadStartedAt)
@@ -148,6 +200,7 @@ final class TranscriptionEngine {
                 .transcriptionEngine,
                 "Model load failed phase=\(loadingPhase) detail=\(loadingDetail) progress=\(Self.progressString(downloadProgress)) elapsed=\(Self.durationString(elapsed)) compiledCache=\(Self.compiledCacheSummary()) error=\(error.localizedDescription)"
             )
+            Self.clearModelLoadRecoveryState()
             resetLoadingState()
             throw error
         }
@@ -194,7 +247,7 @@ final class TranscriptionEngine {
         }
     }
 
-    private func startLoadHeartbeat(variant: String, startedAt: Date) {
+    private func startLoadHeartbeat(variant: String, startedAt: Date, compiledCacheExistedAtStart: Bool) {
         stopLoadHeartbeat()
         loadHeartbeatTask = Task { [weak self] in
             while !Task.isCancelled {
@@ -202,6 +255,17 @@ final class TranscriptionEngine {
                 guard !Task.isCancelled, let self, self.isLoading else { return }
 
                 let elapsed = Date().timeIntervalSince(startedAt)
+                if self.loadingPhase == "Compiling on-device model...",
+                   elapsed >= Self.compileWarningThreshold,
+                   !self.hasLoggedWarmCompileWarning {
+                    self.hasLoggedWarmCompileWarning = true
+                    let compileKind = compiledCacheExistedAtStart ? "Warm launch" : "Cold compile"
+                    self.loadingDetail = "\(compileKind) is taking unusually long. If this launch is force-quit, the next launch will clear the compiled cache automatically."
+                    AppDiagnostics.warning(
+                        .transcriptionEngine,
+                        "Compile exceeded expected duration elapsed=\(Self.durationString(elapsed)) compiledCacheExistedAtStart=\(compiledCacheExistedAtStart ? "yes" : "no") nextLaunchRecovery=clearCompiledCache manualRecoveryCommand=\"\(Self.compiledCacheResetCommand())\" compiledCache=\(Self.compiledCacheSummary())"
+                    )
+                }
                 AppDiagnostics.warning(
                     .transcriptionEngine,
                     "Model load still running variant=\(variant) phase=\(self.loadingPhase) progress=\(Self.progressString(self.downloadProgress)) elapsed=\(Self.durationString(elapsed)) detail=\(self.loadingDetail) compiledCache=\(Self.compiledCacheSummary())"
@@ -222,16 +286,11 @@ final class TranscriptionEngine {
         loadingDetail = ""
         downloadProgress = 0
         nextDownloadLogThreshold = 0.1
+        hasLoggedWarmCompileWarning = false
     }
 
     private static func compiledCacheSummary() -> String {
-        let cacheRoot = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
-        let bundleID = Bundle.main.bundleIdentifier ?? "com.dictatr"
-        let cacheURL = cacheRoot?
-            .appendingPathComponent(bundleID, isDirectory: true)
-            .appendingPathComponent("com.apple.e5rt.e5bundlecache", isDirectory: true)
-
-        guard let cacheURL else {
+        guard let cacheURL = compiledCacheURL() else {
             return "unavailable"
         }
 
@@ -240,6 +299,154 @@ final class TranscriptionEngine {
         }
 
         return "path=\(cacheURL.path) exists=yes"
+    }
+
+    private static func compiledCacheURL() -> URL? {
+        let cacheRoot = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+        let bundleID = Bundle.main.bundleIdentifier ?? "com.dictatr"
+        return cacheRoot?
+            .appendingPathComponent(bundleID, isDirectory: true)
+            .appendingPathComponent("com.apple.e5rt.e5bundlecache", isDirectory: true)
+    }
+
+    private static func compiledCacheExists() -> Bool {
+        guard let cacheURL = compiledCacheURL() else {
+            return false
+        }
+
+        return FileManager.default.fileExists(atPath: cacheURL.path)
+    }
+
+    private static func compiledCacheResetCommand() -> String {
+        "rm -rf ~/Library/Caches/com.hannojacobs.DICTATR/com.apple.e5rt.e5bundlecache"
+    }
+
+    private static func modelLoadRecoveryStateURL() -> URL? {
+        guard let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            return nil
+        }
+
+        return appSupport
+            .appendingPathComponent("DICTATR", isDirectory: true)
+            .appendingPathComponent("Diagnostics", isDirectory: true)
+            .appendingPathComponent("model-load-recovery.json", isDirectory: false)
+    }
+
+    private static func persistModelLoadRecoveryState(
+        variant: String,
+        stage: String,
+        startedAt: Date,
+        compiledCacheExistedAtStart: Bool
+    ) {
+        guard let stateURL = modelLoadRecoveryStateURL() else {
+            return
+        }
+
+        let state = ModelLoadRecoveryState(
+            variant: variant,
+            stage: stage,
+            launchSessionID: AppDiagnostics.launchSessionID,
+            startedAt: startedAt,
+            updatedAt: Date(),
+            osBuild: currentOSBuild(),
+            compiledCacheExistedAtStart: compiledCacheExistedAtStart
+        )
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+
+        do {
+            try FileManager.default.createDirectory(
+                at: stateURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true,
+                attributes: nil
+            )
+            let data = try encoder.encode(state)
+            try data.write(to: stateURL, options: .atomic)
+        } catch {
+            AppDiagnostics.warning(
+                .transcriptionEngine,
+                "Failed to persist model load recovery state path=\(stateURL.path) error=\(error.localizedDescription)"
+            )
+        }
+    }
+
+    private static func clearModelLoadRecoveryState() {
+        guard let stateURL = modelLoadRecoveryStateURL(),
+              FileManager.default.fileExists(atPath: stateURL.path) else {
+            return
+        }
+
+        do {
+            try FileManager.default.removeItem(at: stateURL)
+        } catch {
+            AppDiagnostics.warning(
+                .transcriptionEngine,
+                "Failed to clear model load recovery state path=\(stateURL.path) error=\(error.localizedDescription)"
+            )
+        }
+    }
+
+    private static func recoverFromInterruptedCompileIfNeeded(for variant: String) {
+        guard let stateURL = modelLoadRecoveryStateURL(),
+              let data = try? Data(contentsOf: stateURL) else {
+            return
+        }
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+
+        guard let state = try? decoder.decode(ModelLoadRecoveryState.self, from: data) else {
+            AppDiagnostics.warning(
+                .transcriptionEngine,
+                "Ignoring unreadable model load recovery state path=\(stateURL.path)"
+            )
+            try? FileManager.default.removeItem(at: stateURL)
+            return
+        }
+        defer { try? FileManager.default.removeItem(at: stateURL) }
+
+        guard state.stage == ModelLoadStage.compiling,
+              state.variant == variant,
+              state.osBuild == currentOSBuild() else {
+            return
+        }
+
+        let age = Date().timeIntervalSince(state.updatedAt)
+        AppDiagnostics.warning(
+            .transcriptionEngine,
+            "Recovering from interrupted compile previousLaunchSession=\(state.launchSessionID) previousStage=\(state.stage) previousCompiledCacheExistedAtStart=\(state.compiledCacheExistedAtStart ? "yes" : "no") age=\(durationString(age)) action=clearCompiledCache compiledCache=\(compiledCacheSummary())"
+        )
+
+        if let cacheURL = compiledCacheURL(), FileManager.default.fileExists(atPath: cacheURL.path) {
+            do {
+                try FileManager.default.removeItem(at: cacheURL)
+                AppDiagnostics.info(
+                    .transcriptionEngine,
+                    "Compiled cache cleared after interrupted compile path=\(cacheURL.path)"
+                )
+            } catch {
+                AppDiagnostics.warning(
+                    .transcriptionEngine,
+                    "Failed to clear compiled cache after interrupted compile path=\(cacheURL.path) error=\(error.localizedDescription)"
+                )
+            }
+        }
+    }
+
+    private static func currentOSBuild() -> String {
+        var size = 0
+        guard sysctlbyname("kern.osversion", nil, &size, nil, 0) == 0, size > 0 else {
+            return "unknown"
+        }
+
+        var buffer = [CChar](repeating: 0, count: size)
+        guard sysctlbyname("kern.osversion", &buffer, &size, nil, 0) == 0 else {
+            return "unknown"
+        }
+
+        return String(cString: buffer)
     }
 
     private static func cachedModelFolder(for variant: String) -> URL? {

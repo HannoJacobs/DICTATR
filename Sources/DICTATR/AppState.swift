@@ -12,8 +12,8 @@
 // STARTUP SEQUENCE:
 //   1. init()              — register defaults, open DB, register hotkey, start model download
 //   2. startModelDownload() — TranscriptionEngine.loadModel() in a Task
-//   3. DICTATRApp shows ModelDownloadView while !isModelLoaded
-//   4. When isModelLoaded becomes true → MenuBarView shown, hotkey active
+//   3. DICTATRApp keeps the menu available while the model loads in the background
+//   4. When isModelLoaded becomes true → hotkey recording becomes available
 //
 // RECORDING PIPELINE:
 //   toggleRecording() → startRecording()
@@ -190,7 +190,7 @@ final class AppState {
             } catch {
                 if Task.isCancelled { return }
                 self.statusMessage = "Model load failed"
-                self.errorMessage = "Download failed: \(error.localizedDescription)"
+                self.errorMessage = "Model load failed: \(error.localizedDescription)"
                 AppDiagnostics.error(.appState, "Model load failed error=\(error.localizedDescription)")
             }
         }
@@ -218,8 +218,15 @@ final class AppState {
 
     private func startRecording() {
         guard transcriptionEngine.isModelLoaded else {
-            errorMessage = "Model is still loading. Please wait."
-            AppDiagnostics.warning(.appState, "startRecording blocked because model is still loading")
+            if !transcriptionEngine.isLoading {
+                AppDiagnostics.info(.appState, "startRecording triggered model load because model is not ready")
+                statusMessage = "Loading model..."
+                errorMessage = "Model is loading. Please wait."
+                startModelDownload()
+            } else {
+                errorMessage = "Model is still loading. Please wait."
+                AppDiagnostics.warning(.appState, "startRecording blocked because model is still loading")
+            }
             return
         }
 

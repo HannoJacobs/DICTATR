@@ -10,9 +10,6 @@ struct DICTATRApp: App {
             if !appState.hasCompletedOnboarding {
                 OnboardingView()
                     .environment(appState)
-            } else if !appState.isModelLoaded {
-                ModelDownloadView()
-                    .environment(appState)
             } else {
                 MenuBarView()
                     .environment(appState)

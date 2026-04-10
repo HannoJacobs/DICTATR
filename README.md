@@ -168,6 +168,27 @@ ls -lt ~/Library/Application\ Support/DICTATR/Logs
 rg -n "watchdog|config change|retry|force reset|built-in mic|recording start" ~/Library/Application\ Support/DICTATR/Logs/latest.log
 ```
 
+If the app keeps relaunching into `Compiling on-device model...` for multiple minutes,
+treat that as a compiled-cache incident first, not a missing-model incident.
+
+Immediate recovery:
+
+```bash
+pkill -x DICTATR
+rm -rf ~/Library/Caches/com.hannojacobs.DICTATR/com.apple.e5rt.e5bundlecache
+open -a /Applications/DICTATR.app
+tail -f ~/Library/Application\ Support/DICTATR/Logs/latest.log
+```
+
+Expected evidence:
+- The next launch should log `compiledCache=missing` before CoreML load starts.
+- Newer builds keep the menu available while the model loads in the background, so a slow compile no longer looks like a failed startup.
+- If the previous launch died during compile, newer builds also write
+  `~/Library/Application Support/DICTATR/Diagnostics/model-load-recovery.json`
+  while the compile is in flight and clear the compiled cache automatically on the next launch.
+
+For the full runbook, see [`docs/model_load_stall_runbook.md`](/Users/hannojacobs/Documents/Code/DICTATR/docs/model_load_stall_runbook.md).
+
 ---
 
 ## Required Permissions
@@ -197,7 +218,6 @@ Sources/DICTATR/
 
   Views/
     MenuBarView.swift           — main popup panel + inline settings panel
-    ModelDownloadView.swift     — startup progress screen while model downloads
     OnboardingView.swift        — first-launch permission setup
     HistoryListView.swift       — searchable list of past dictations (separate Window)
     SettingsView.swift          — GeneralSettingsView + AboutSettingsView
