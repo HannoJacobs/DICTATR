@@ -8,9 +8,15 @@ APP_BUNDLE="${APP_NAME}.app"
 BUILD_DIR="build-release"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SOURCE_PLIST="$SCRIPT_DIR/Sources/DICTATR/Info.plist"
+LOCAL_DERIVED_BINARY="$SCRIPT_DIR/.deriveddata/Build/Products/Release/${APP_NAME}"
 
-# Find the Release binary from Xcode's DerivedData
-BINARY=$(find ~/Library/Developer/Xcode/DerivedData -path "*/Release/${APP_NAME}" -type f 2>/dev/null | head -1)
+# Prefer the repo-local verified Release binary when present; fall back to Xcode's
+# default DerivedData layout for manual GUI builds.
+if [ -f "$LOCAL_DERIVED_BINARY" ]; then
+    BINARY="$LOCAL_DERIVED_BINARY"
+else
+    BINARY=$(find ~/Library/Developer/Xcode/DerivedData -path "*/Release/${APP_NAME}" -type f 2>/dev/null | head -1)
+fi
 
 if [ -z "$BINARY" ]; then
     echo "Error: No Release build found."

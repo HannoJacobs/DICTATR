@@ -19,7 +19,7 @@
 //   stopRecording()  → signals tap to stop (atomic), removes tap, stops engine, returns (url, duration)
 //   The caller (AppState) owns cleanup of the WAV file after transcription.
 //
-// BLUETOOTH HFP HANDLING (v1.14):
+// BLUETOOTH HFP HANDLING (v1.15):
 //   Bluetooth headphones switch from A2DP to HFP when mic input is activated by
 //   engine.start(). The format looks valid (44100Hz A2DP) before start, so we can't
 //   detect HFP in advance. Two things happen:
@@ -27,10 +27,10 @@
 //   1. Engine gets killed by CoreAudio during HFP negotiate (~168ms after start).
 //      This is unavoidable. AppState's retry handles it.
 //
-//   2. On retry (especially built-in mic fallback), the engine stays running but
-//      a config change fires as HFP finishes settling. The tap is silently invalidated
-//      by the hardware reconfiguration. Fix: reinstall the tap on config change
-//      instead of ignoring it.
+//   2. On retry (especially built-in mic fallback), the engine may survive but the
+//      Bluetooth route keeps renegotiating underneath it. Reinstalling the tap in
+//      that intermediate state can trip AVAudioEngine format assertions. Fix: reset
+//      the recorder and let AppState restart with a fresh engine after the route settles.
 
 import AVFoundation
 import CoreAudio
@@ -56,6 +56,7 @@ final class AudioRecorder {
 
     /// Stored for tap reinstallation after config changes.
     private var activeTargetFormat: AVAudioFormat?
+    private var activeRouteInvolvesBluetooth = false
 
     var onRecordingFailed: ((String) -> Void)?
     var onRecordingStable: (() -> Void)?
@@ -125,6 +126,7 @@ final class AudioRecorder {
         self.outputFile = file
         self.outputURL = fileURL
         self.activeTargetFormat = targetFormat
+        self.activeRouteInvolvesBluetooth = AudioDeviceDiagnostics.activeRouteInvolvesBluetooth()
         self._isCapturing.withLock { $0 = true }
         self._framesWritten.withLock { $0 = 0 }
         self._droppedFrames.withLock { $0 = 0 }
@@ -170,8 +172,8 @@ final class AudioRecorder {
             throw error
         }
 
-        // Observe audio configuration changes. On config change we reinstall the tap
-        // with the current format — ignoring changes caused the tap to go dead (v1.11 bug).
+        // Observe audio configuration changes. Bluetooth route churn now forces a clean
+        // restart instead of trying to mutate a live engine through format renegotiation.
         configObserver = NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange,
             object: engine,
@@ -295,9 +297,9 @@ final class AudioRecorder {
     /// Hardware config changed (Bluetooth HFP settle, device disconnect, etc.).
     ///
     /// Two cases:
-    ///   - Engine still running: reinstall the tap with the current format. Config changes
-    ///     invalidate the tap even when the engine survives. Re-apply device override too.
-    ///   - Engine stopped: HFP killed it. Tear down and let AppState retry.
+    ///   - Bluetooth route involved: force a clean reset and let AppState retry with a
+    ///     fresh engine after the route settles.
+    ///   - No Bluetooth route involved: keep the older in-place tap reinstall path.
     private func handleConfigurationChange() {
         guard isRecording else { return }
         guard let engine = audioEngine else {
@@ -315,6 +317,18 @@ final class AudioRecorder {
             .audioRecorder,
             "config change received session=\(recordingSessionID ?? "none") engineRunning=\(engine.isRunning) elapsed=\(elapsed) frames=\(frames) dropped=\(dropped) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
         )
+
+        let routeInvolvesBluetooth = activeRouteInvolvesBluetooth || AudioDeviceDiagnostics.activeRouteInvolvesBluetooth()
+
+        if routeInvolvesBluetooth {
+            AppDiagnostics.warning(
+                .audioRecorder,
+                "config change forcing clean restart session=\(recordingSessionID ?? "none") engineRunning=\(engine.isRunning) bluetoothRoute=true elapsed=\(elapsed) frames=\(frames) dropped=\(dropped)"
+            )
+            forceReset(reason: engine.isRunning ? "config change during bluetooth route churn" : "config change stopped engine during bluetooth route churn")
+            onRecordingFailed?("Audio device changed. Reconnecting...")
+            return
+        }
 
         if engine.isRunning {
             guard let targetFormat = activeTargetFormat, let file = outputFile else {
@@ -423,6 +437,7 @@ final class AudioRecorder {
         outputFile = nil
         recordingStartTime = nil
         activeTargetFormat = nil
+        activeRouteInvolvesBluetooth = false
 
         AppDiagnostics.info(
             .audioRecorder,
@@ -467,6 +482,7 @@ final class AudioRecorder {
         outputFile = nil
         recordingStartTime = nil
         activeTargetFormat = nil
+        activeRouteInvolvesBluetooth = false
         isRecording = false
         recordingDuration = 0
         recordingSessionID = nil
@@ -487,6 +503,7 @@ final class AudioRecorder {
         self.outputFile = nil
         self.outputURL = nil
         self.activeTargetFormat = nil
+        self.activeRouteInvolvesBluetooth = false
         self.isRecording = false
         self.recordingDuration = 0
         self.recordingStartTime = nil

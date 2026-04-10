@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.21
+- Added a `Hard Reset Audio` menu action that force-resets DICTATR's own recorder state and terminates the owning Chromium/Electron app process when one of its audio utility helpers is contending for the microphone route.
+- Hard audio reset outcomes are now logged explicitly, including killed owner-process PIDs, skipped processes, and process-enumeration failures, so future Bluetooth or route-churn incidents leave a concrete audit trail.
+- Recorded April 10 Bluetooth investigation evidence showing that both AirPods 3 and Bose QC45 did work in DICTATR before the current regression, so the active issue should be treated as a new breakage rather than a permanent Bluetooth limitation.
+- Replaced the risky in-place tap reinstall during Bluetooth route reconfiguration with a clean recorder reset plus reconnect, avoiding the observed `format.sampleRate == inputHWFormat.sampleRate` AVAudioEngine assertion during route churn.
+
 ## 1.20
 - Stopped trusting WhisperKit's heavy `openai_whisper-large-v3-v20240930_626MB` default on the affected M1 Mac class and now prefer `openai_whisper-small.en` there for startup reliability.
 - Added explicit diagnostics for the effective model variant, the WhisperKit default it replaced, and the selection reason so future startup incidents can distinguish a policy choice from a package default.

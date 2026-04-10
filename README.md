@@ -171,6 +171,17 @@ ls -lt ~/Library/Application\ Support/DICTATR/Logs
 rg -n "watchdog|config change|retry|force reset|built-in mic|recording start" ~/Library/Application\ Support/DICTATR/Logs/latest.log
 ```
 
+If DICTATR is stuck in a Bluetooth / HFP route fight, the menu now includes `Hard Reset Audio`.
+That action does three things together:
+- cancels DICTATR's pending reconnect retries
+- force-resets DICTATR's own `AVAudioEngine` state
+- terminates the owning Chromium/Electron app process when one of its audio helpers is holding the mic route
+
+Expected evidence after using it:
+- `latest.log` should contain `hardResetAudioContention requested`
+- any killed owner processes are logged as `hard audio reset killed pid=...`
+- DICTATR returns to `Audio reset complete` and you can try dictation again immediately
+
 If the app keeps relaunching into `Compiling on-device model...` for multiple minutes,
 check the logged `effectiveVariant` first. A repeated stall on the old large-v3 default is
 now a model-policy bug; a repeated stall on the selected variant is a compiled-cache incident.

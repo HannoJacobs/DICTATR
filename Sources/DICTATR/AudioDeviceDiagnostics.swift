@@ -22,6 +22,28 @@ enum AudioDeviceDiagnostics {
         }
     }
 
+    static func defaultInputIsBluetooth() -> Bool {
+        guard let device = defaultDevice(selector: kAudioHardwarePropertyDefaultInputDevice),
+              let transport = transportType(for: device) else {
+            return false
+        }
+
+        return transport == kAudioDeviceTransportTypeBluetooth || transport == kAudioDeviceTransportTypeBluetoothLE
+    }
+
+    static func defaultOutputIsBluetooth() -> Bool {
+        guard let device = defaultDevice(selector: kAudioHardwarePropertyDefaultOutputDevice),
+              let transport = transportType(for: device) else {
+            return false
+        }
+
+        return transport == kAudioDeviceTransportTypeBluetooth || transport == kAudioDeviceTransportTypeBluetoothLE
+    }
+
+    static func activeRouteInvolvesBluetooth() -> Bool {
+        defaultInputIsBluetooth() || defaultOutputIsBluetooth()
+    }
+
     private static func allDevices() -> [AudioDeviceID] {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDevices,

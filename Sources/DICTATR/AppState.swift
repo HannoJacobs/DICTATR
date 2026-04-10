@@ -109,6 +109,7 @@ final class AppState {
     var isModelLoading: Bool { transcriptionEngine.isLoading }
     var configuredModelVariant: String { transcriptionEngine.configuredModelVariant }
     var configuredModelPolicySummary: String { transcriptionEngine.configuredModelPolicySummary }
+    var canHardResetAudio: Bool { currentState != .transcribing }
 
     init() {
         // Register defaults (idempotent, never overwrites explicit user choices)
@@ -211,6 +212,60 @@ final class AppState {
         startModelDownload()
     }
 
+    func hardResetAudioContention() {
+        guard currentState != .transcribing else {
+            AppDiagnostics.warning(.appState, "hardResetAudioContention ignored during transcription")
+            errorMessage = "Wait for transcription to finish before resetting audio."
+            return
+        }
+
+        AppDiagnostics.warning(
+            .appState,
+            "hardResetAudioContention requested currentState=\(String(describing: currentState)) retryCount=\(autoRetryCount) recoveryPending=\(recordingRecoveryPending) useBuiltInMic=\(audioRecorder.useBuiltInMic) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
+        )
+
+        autoRetryTask?.cancel()
+        autoRetryTask = nil
+        recordingRecoveryPending = false
+        autoRetryCount = 0
+        audioRecorder.forceReset(reason: "user requested hard audio reset")
+        audioRecorder.useBuiltInMic = false
+        recordingIndicator.hide()
+        currentState = .idle
+
+        let result = AudioContentionReset.killLikelyContenders(excluding: [Int32(ProcessInfo.processInfo.processIdentifier)])
+
+        if let inspectionFailure = result.inspectionFailure {
+            statusMessage = "Audio reset failed"
+            errorMessage = inspectionFailure
+            AppDiagnostics.error(.appState, "hard audio reset process inspection failed error=\(inspectionFailure)")
+            return
+        }
+
+        for killed in result.killed {
+            AppDiagnostics.warning(.appState, "hard audio reset killed pid=\(killed.pid) details=\(killed.description)")
+        }
+
+        for skipped in result.skipped {
+            AppDiagnostics.warning(.appState, "hard audio reset skipped \(skipped)")
+        }
+
+        statusMessage = "Audio reset complete"
+        if !result.killed.isEmpty {
+            let suffix = result.killed.count == 1 ? "process" : "processes"
+            errorMessage = "Killed \(result.killed.count) external audio \(suffix). Try dictation again."
+        } else if !result.skipped.isEmpty {
+            errorMessage = "Found external audio processes, but DICTATR could not terminate all of them."
+        } else {
+            errorMessage = "No external Chromium or Electron audio helpers were running."
+        }
+
+        AppDiagnostics.info(
+            .appState,
+            "hard audio reset completed killed=\(result.killed.count) skipped=\(result.skipped.count) message=\(errorMessage ?? "none") route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
+        )
+    }
+
     func toggleRecording() {
         AppDiagnostics.info(
             .appState,
@@ -218,10 +273,19 @@ final class AppState {
         )
         switch currentState {
         case .idle:
+            if recordingRecoveryPending {
+                statusMessage = audioRecorder.useBuiltInMic ? "Using MacBook mic..." : "Reconnecting..."
+                errorMessage = "Microphone recovery is already in progress. Please wait."
+                AppDiagnostics.warning(
+                    .appState,
+                    "toggleRecording ignored because microphone recovery is already pending retryCount=\(autoRetryCount) useBuiltInMic=\(audioRecorder.useBuiltInMic) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
+                )
+                return
+            }
             autoRetryCount = 0
             recordingRecoveryPending = false
             autoRetryTask?.cancel()
-            audioRecorder.useBuiltInMic = false
+            configurePreferredInputForNewRecording()
             startRecording()
         case .recording:
             stopRecordingAndTranscribe()
@@ -245,6 +309,7 @@ final class AppState {
             return
         }
 
+        configurePreferredInputForNewRecording()
         AppDiagnostics.info(
             .appState,
             "startRecording requested retryCount=\(autoRetryCount) useBuiltInMic=\(audioRecorder.useBuiltInMic) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
@@ -372,6 +437,7 @@ final class AppState {
 
     private func retryStartRecording() {
         guard transcriptionEngine.isModelLoaded else { return }
+        configurePreferredInputForRetry()
         AppDiagnostics.info(
             .appState,
             "retryStartRecording retryCount=\(autoRetryCount) useBuiltInMic=\(audioRecorder.useBuiltInMic) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
@@ -402,6 +468,35 @@ final class AppState {
                 errorMessage = "Could not access any microphone."
                 recordingIndicator.hide()
             }
+        }
+    }
+
+    private func configurePreferredInputForNewRecording() {
+        if AudioDeviceDiagnostics.defaultInputIsBluetooth(), AudioDeviceDiagnostics.findBuiltInMicDevice() != nil {
+            if !audioRecorder.useBuiltInMic {
+                AppDiagnostics.warning(
+                    .appState,
+                    "Bluetooth default input detected — preferring MacBook mic for new recording route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
+                )
+            }
+            audioRecorder.useBuiltInMic = true
+            return
+        }
+
+        audioRecorder.useBuiltInMic = false
+    }
+
+    private func configurePreferredInputForRetry() {
+        if audioRecorder.useBuiltInMic {
+            return
+        }
+
+        if AudioDeviceDiagnostics.defaultInputIsBluetooth(), AudioDeviceDiagnostics.findBuiltInMicDevice() != nil {
+            AppDiagnostics.warning(
+                .appState,
+                "Bluetooth default input still active during retry — forcing MacBook mic route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
+            )
+            audioRecorder.useBuiltInMic = true
         }
     }
 
