@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.23
+- Replaced the old hand-built DMG wrapper with an archive-based release path that packages the real macOS app bundle instead of reconstructing `Contents/` around a raw binary.
+- Added centralized release signing config in `release.env`, fail-fast signing checks, designated-requirement validation, and configurable `spctl` verification so DICTATR ships with a stable code identity instead of a per-build `cdhash`.
+- Added `install-release.sh` to install the archived app to `/Applications/DICTATR.app`, verify the installed signature and launch log, and surface missing Accessibility trust by resetting DICTATR's TCC entry and opening the Accessibility pane.
+- Added an explicit `adhoc` release mode for local non-Developer-ID builds. That mode still verifies the shipped app and launch log, but it now explicitly forces the Accessibility re-enable flow because trust persistence is impossible without stable signing.
+- Launch diagnostics now record `accessibilityTrusted=yes|no`, so full-send verification can prove whether the installed app retained Accessibility permission after an upgrade.
+
+## Unreleased
+
 ## 1.22
 - Removed the built-in-mic fallback path so DICTATR now stays on the active system route instead of switching away from Bluetooth input during recovery.
 - Changed recording retries to reconnect on the current route, which keeps Bluetooth microphone and Bluetooth headphone output paired through HFP renegotiation instead of forcing a mixed-device route.

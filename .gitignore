@@ -3,6 +3,7 @@
 *.xcworkspace/xcuserdata/
 *.xcodeproj/project.xcworkspace/xcshareddata/IDEWorkspaceChecks.plist
 DerivedData/
+.deriveddata/
 *.hmap
 *.ipa
 *.dSYM.zip
@@ -38,8 +39,11 @@ Pods/
 # App-specific
 *.app
 *.dmg
+release.env
 
 # Build artifacts
 build/
+build-release/
+.build-archive/
 
 _*

@@ -60,21 +60,29 @@ still take time, but it should no longer block behind the slowest known default 
 ## Distributing as a DMG
 
 ```bash
-# 1. Build Release in Xcode:
-#    Product → Scheme → Edit Scheme → Run → Build Configuration: Release → Close → Cmd+B
+# 1. Create release.env from release.env.example
+cp release.env.example release.env
 
-# 2. Package into a DMG:
+# 2. Build, sign, verify, and package the app bundle:
 bash create-dmg.sh
 ```
 
-This produces `DICTATR.dmg`. Recipients drag the `.app` to `/Applications` and open it
-with right-click → Open on first launch (Gatekeeper bypass for unsigned apps).
+`create-dmg.sh` now archives the real macOS app bundle from Xcode, signs that `.app`,
+verifies the code identity, and only then packages `DICTATR.dmg`. It no longer wraps a bare
+Mach-O binary into a synthetic app bundle.
 
 ### Permissions after installing from DMG
-The DMG app has a different code identity from the Xcode-run version. Recipients must
-re-grant both permissions:
+The Xcode-run app and the shipped `/Applications/DICTATR.app` are still different app
+instances, so the first installed release still needs permissions granted once:
 - **Microphone** — prompted automatically
 - **Accessibility** — must grant manually in System Settings → Privacy & Security → Accessibility
+
+If you use `DICTATR_CODESIGN_MODE="adhoc"`, upgrades will still require Accessibility to be
+re-enabled after install. That mode is supported for local use, but it cannot preserve trust
+across releases.
+
+If you use `DICTATR_CODESIGN_MODE="developer_id"` with a stable Developer ID certificate,
+normal upgrades should keep Accessibility trust.
 
 ---
 
@@ -101,19 +109,31 @@ each release, but there is now a single source of truth.
 # 0. Bump version in Sources/DICTATR/Info.plist
 #    Update CFBundleVersion and CFBundleShortVersionString
 
-# 1. Build Release in Xcode (Cmd+B with Release config)
+# 1. Create release.env from release.env.example
+#    and set:
+#    - DICTATR_CODESIGN_MODE=adhoc or developer_id
+#    - DICTATR_SPCTL_EXPECT
+#    - DICTATR_CODESIGN_IDENTITY (developer_id mode only)
 
-# 2. Package the DMG
+# 2. Build, sign, verify, and package the DMG
 bash create-dmg.sh
 
-# 3. Create a GitHub release and upload the DMG
+# 3. Install and verify the built app locally
+bash install-release.sh
+
+# 4. Create a GitHub release and upload the DMG
 gh release create v1.1 DICTATR.dmg \
   --title "DICTATR v1.1" \
   --notes "What changed in this version."
 ```
 
-That's it. The website download button automatically serves the new file, and the website
-version label follows the latest GitHub release automatically.
+`install-release.sh` verifies the installed signature and launch log, checks that the app is
+running from `/Applications/DICTATR.app`, confirms the expected version/build, and surfaces
+missing Accessibility trust immediately. If Accessibility is missing, it resets the DICTATR
+TCC entry and opens the correct System Settings pane instead of silently continuing.
+
+The website download button automatically serves the new file, and the website version label
+follows the latest GitHub release automatically.
 
 **First-time GitHub Pages setup** (one-off, already done):
 1. Go to repo Settings → Pages
@@ -124,18 +144,23 @@ version label follows the latest GitHub release automatically.
 **To update the landing page**, edit `docs/index.html`, commit, and push. GitHub Pages
 redeploys automatically within ~30 seconds.
 
-### Local app version after manual binary swap
+### Release config
 
-If you replace `/Applications/DICTATR.app/Contents/MacOS/DICTATR` directly with a freshly
-built binary, the executable code updates but Finder/About may still show the old version
-from `/Applications/DICTATR.app/Contents/Info.plist`.
-
-To keep local version reporting aligned with the deployed build, also update:
+Use `release.env` as the single local config source for release signing:
 
 ```bash
-/usr/libexec/PlistBuddy -c "Set :CFBundleVersion X.Y" /Applications/DICTATR.app/Contents/Info.plist
-/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString X.Y" /Applications/DICTATR.app/Contents/Info.plist
+cp release.env.example release.env
 ```
+
+Required values:
+
+- `DICTATR_CODESIGN_MODE` — `adhoc` for local unsigned/ad-hoc releases, or `developer_id` for stable Developer ID signing
+- `DICTATR_SPCTL_EXPECT` — `accepted`, `rejected`, or `skip`
+- `DICTATR_CODESIGN_IDENTITY` — required only for `developer_id` mode
+
+The scripts fail fast if the selected mode is misconfigured. In `adhoc` mode they will build,
+package, install, verify, and then force the Accessibility repair path because trust cannot
+persist across updates with ad-hoc signing.
 
 ### Diagnostics Logs
 
@@ -154,7 +179,7 @@ latest.log
 
 What gets logged:
 - Model policy selection, including the effective variant, the WhisperKit default, and the reason for any reliability override
-- App launch / reopen with version, build, PID, macOS build, hardware model, bundle path, and diagnostics file path
+- App launch / reopen with version, build, PID, macOS build, hardware model, bundle path, diagnostics file path, and Accessibility trust status
 - Model startup with selected WhisperKit variant, resolved model folder, compiled-cache snapshot, download milestones, per-phase timings, and long-load heartbeats
 - Full audio device inventory at launch
 - Recording start, input format, built-in mic override attempts, config changes, watchdog failures, retries, and force resets
@@ -266,21 +291,16 @@ For longer content, break it into multiple dictation sessions.
 
 ## Known Limitations & Gotchas
 
-### ⚠️  Bundle.module crash in manually-bundled apps
+### Historical gotcha: manually-bundled apps
 
-**Any SPM package that calls `Bundle.module` internally crashes with `EXC_BREAKPOINT` when
-distributed via `create-dmg.sh`.** Xcode copies SPM resource bundles into
-`Contents/Resources/`; the shell-script bundler does not.
+Older DICTATR builds used a hand-assembled `.app` that wrapped the raw executable. That
+distribution path was broken for two reasons:
 
-Affected APIs removed or replaced:
+- Xcode-managed SPM resource bundles were missing
+- the shipped app identity was unstable, which broke Accessibility trust persistence
 
-| Was | Replaced with | File |
-|---|---|---|
-| `KeyboardShortcuts.Recorder` | Read-only text display | `SettingsView.swift` |
-| `LaunchAtLogin.Toggle` | Removed (needs signed app) | `SettingsView.swift` |
-
-**To re-enable these:** code-sign the app with an Apple Developer certificate. Xcode will
-then copy the SPM resource bundles and `Bundle.module` will work.
+`create-dmg.sh` no longer uses that packaging path. The post-mortem remains useful context if
+you ever see an old build or reproduce the issue manually.
 
 Full diagnosis and post-mortem: [`settings-bug.md`](settings-bug.md)
 
@@ -293,16 +313,11 @@ SwiftUI `Button` inside a `MenuBarExtra(.window)` scene has unreliable hit-testi
 **Fix:** use `HStack` + `.contentShape(Rectangle())` + `.onTapGesture` for full-width,
 reliable tap targets. See `MenuBarView.swift`.
 
-### "DICTATR is damaged and can't be opened" after installing from DMG
+### Gatekeeper result depends on notarization state
 
-macOS quarantines unsigned apps downloaded via browser. Right-click → Open does not fix
-this variant. Run this in Terminal after dragging to Applications:
-
-```bash
-xattr -cr /Applications/DICTATR.app
-```
-
-Then open normally.
+The release scripts verify whatever signing mode you selected in `release.env`. In `adhoc`
+mode, Gatekeeper rejection is expected. In `developer_id` mode, the observed `spctl` result
+must match the configured expectation instead of being assumed.
 
 ### Moving the project folder breaks Xcode (no targets / no run destination)
 

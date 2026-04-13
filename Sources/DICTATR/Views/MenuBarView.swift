@@ -193,9 +193,7 @@ struct MenuBarView: View {
                 PasteManager.checkAccessibilityPermission() ? "Accessibility: Granted" : "Grant Accessibility",
                 icon: PasteManager.checkAccessibilityPermission() ? "checkmark.circle.fill" : "lock.shield"
             ) {
-                if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
-                    NSWorkspace.shared.open(url)
-                }
+                PasteManager.openAccessibilitySettings()
             }
             .foregroundStyle(PasteManager.checkAccessibilityPermission() ? .green : .primary)
 

@@ -36,6 +36,19 @@ struct PasteManager {
         AXIsProcessTrustedWithOptions(options)
     }
 
+    static func accessibilityStatusSummary() -> String {
+        checkAccessibilityPermission() ? "yes" : "no"
+    }
+
+    static func accessibilitySettingsURL() -> URL? {
+        URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+    }
+
+    static func openAccessibilitySettings() {
+        guard let url = accessibilitySettingsURL() else { return }
+        NSWorkspace.shared.open(url)
+    }
+
     private static func simulatePaste() {
         let vKeyCode: CGKeyCode = 9 // 'v' key
 

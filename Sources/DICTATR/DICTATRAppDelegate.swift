@@ -4,7 +4,7 @@ final class DICTATRAppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppDiagnostics.info(
             .lifecycle,
-            "applicationDidFinishLaunching \(AppDiagnostics.runtimeSummary) route=\(AudioDeviceDiagnostics.currentRouteSnapshot()) devices=\(AudioDeviceDiagnostics.availableDevicesSnapshot())"
+            "applicationDidFinishLaunching \(AppDiagnostics.runtimeSummary) accessibilityTrusted=\(PasteManager.accessibilityStatusSummary()) route=\(AudioDeviceDiagnostics.currentRouteSnapshot()) devices=\(AudioDeviceDiagnostics.availableDevicesSnapshot())"
         )
     }
 

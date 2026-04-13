@@ -1,78 +1,78 @@
 #!/bin/bash
 set -euo pipefail
 
-APP_NAME="DICTATR"
-BUNDLE_ID="com.hannojacobs.DICTATR"
-DMG_NAME="${APP_NAME}.dmg"
-APP_BUNDLE="${APP_NAME}.app"
-BUILD_DIR="build-release"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SOURCE_PLIST="$SCRIPT_DIR/Sources/DICTATR/Info.plist"
-LOCAL_DERIVED_BINARY="$SCRIPT_DIR/.deriveddata/Build/Products/Release/${APP_NAME}"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/release-common.sh"
 
-# Prefer the repo-local verified Release binary when present; fall back to Xcode's
-# default DerivedData layout for manual GUI builds.
-if [ -f "$LOCAL_DERIVED_BINARY" ]; then
-    BINARY="$LOCAL_DERIVED_BINARY"
-else
-    BINARY=$(find ~/Library/Developer/Xcode/DerivedData -path "*/Release/${APP_NAME}" -type f 2>/dev/null | head -1)
-fi
+assert_release_config
+require_command xcodebuild
+require_command codesign
+require_command hdiutil
+require_command ditto
 
-if [ -z "$BINARY" ]; then
-    echo "Error: No Release build found."
-    echo "In Xcode:"
-    echo "  1. Product > Scheme > Edit Scheme"
-    echo "  2. Select 'Run' on the left"
-    echo "  3. Change Build Configuration to 'Release'"
-    echo "  4. Close, then Cmd+B to build"
-    exit 1
-fi
+require_file "$WORKSPACE_PATH"
+require_file "$SOURCE_PLIST"
+require_file "$SCRIPT_DIR/AppIcon.icns"
 
-echo "Found binary: $BINARY"
+note "Building Release archive"
+rm -rf "$BUILD_DIR" "$DMG_PATH"
+mkdir -p "$BUILD_DIR"
 
-# Clean previous build artifacts
-rm -rf "$BUILD_DIR" "$DMG_NAME"
-mkdir -p "$BUILD_DIR/$APP_BUNDLE/Contents/MacOS"
-mkdir -p "$BUILD_DIR/$APP_BUNDLE/Contents/Resources"
+xcodebuild \
+    -workspace "$WORKSPACE_PATH" \
+    -scheme "$SCHEME_NAME" \
+    -configuration Release \
+    -destination 'generic/platform=macOS' \
+    -archivePath "$ARCHIVE_PATH" \
+    CODE_SIGNING_ALLOWED=NO \
+    archive
 
-# Copy binary
-cp "$BINARY" "$BUILD_DIR/$APP_BUNDLE/Contents/MacOS/$APP_NAME"
+require_file "$ARCHIVE_BINARY_PATH"
 
-# Copy app icon
-if [ -f "$SCRIPT_DIR/AppIcon.icns" ]; then
-    cp "$SCRIPT_DIR/AppIcon.icns" "$BUILD_DIR/$APP_BUNDLE/Contents/Resources/AppIcon.icns"
-    echo "Included app icon"
-fi
+RELEASE_PRODUCTS_DIR="$(archive_build_products_dir)"
+require_file "$RELEASE_PRODUCTS_DIR"
 
-if [ ! -f "$SOURCE_PLIST" ]; then
-    echo "Error: Missing source Info.plist at $SOURCE_PLIST"
-    exit 1
-fi
+note "Assembling app bundle from archived binary and Xcode resource bundles"
+rm -rf "$ARCHIVED_APP_PATH"
+mkdir -p "$ARCHIVED_APP_PATH/Contents/MacOS" "$ARCHIVED_APP_PATH/Contents/Resources"
+ditto "$ARCHIVE_BINARY_PATH" "$ARCHIVED_APP_PATH/Contents/MacOS/$APP_NAME"
+ditto "$SOURCE_PLIST" "$ARCHIVED_APP_PATH/Contents/Info.plist"
+ditto "$SCRIPT_DIR/AppIcon.icns" "$ARCHIVED_APP_PATH/Contents/Resources/AppIcon.icns"
 
-cp "$SOURCE_PLIST" "$BUILD_DIR/$APP_BUNDLE/Contents/Info.plist"
+find "$RELEASE_PRODUCTS_DIR" -maxdepth 1 -name '*.bundle' -type d -print0 | while IFS= read -r -d '' bundle_path; do
+    ditto "$bundle_path" "$ARCHIVED_APP_PATH/Contents/Resources/$(basename "$bundle_path")"
+done
 
-echo "Created $APP_BUNDLE"
+assert_bundle_metadata "$ARCHIVED_APP_PATH"
 
-# Create a temporary DMG directory with the app and an Applications symlink
+note "Signing archived app with $(codesign_identity_label)"
+codesign \
+    --force \
+    --deep \
+    ${DICTATR_CODESIGN_MODE:+--options runtime} \
+    --sign "$(codesign_identity_label)" \
+    "$ARCHIVED_APP_PATH"
+
+verify_signed_app "$ARCHIVED_APP_PATH"
+
 DMG_STAGING="$BUILD_DIR/dmg-staging"
+rm -rf "$DMG_STAGING"
 mkdir -p "$DMG_STAGING"
-cp -R "$BUILD_DIR/$APP_BUNDLE" "$DMG_STAGING/"
+
+note "Preparing DMG staging directory"
+ditto "$ARCHIVED_APP_PATH" "$DMG_STAGING/$APP_BUNDLE"
 ln -s /Applications "$DMG_STAGING/Applications"
 
-# Create the DMG
-hdiutil create -volname "$APP_NAME" \
+note "Creating $DMG_PATH"
+hdiutil create \
+    -volname "$APP_NAME" \
     -srcfolder "$DMG_STAGING" \
-    -ov -format UDZO \
-    "$DMG_NAME"
+    -ov \
+    -format UDZO \
+    "$DMG_PATH"
 
-# Clean up
-rm -rf "$BUILD_DIR"
-
-echo ""
-echo "Done! Created: $DMG_NAME"
-echo ""
-echo "To install, your colleagues should:"
-echo "  1. Open the DMG"
-echo "  2. Drag DICTATR to the Applications folder"
-echo "  3. Right-click the app > Open (first time only, to bypass Gatekeeper)"
-echo "  4. Grant Microphone and Accessibility permissions when prompted"
+note "Created $DMG_PATH"
+echo "Archive: $ARCHIVE_PATH"
+echo "App: $ARCHIVED_APP_PATH"
+echo "DMG: $DMG_PATH"
