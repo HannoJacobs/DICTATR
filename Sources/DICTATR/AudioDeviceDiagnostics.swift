@@ -2,50 +2,194 @@ import CoreAudio
 import Foundation
 
 enum AudioDeviceDiagnostics {
-    static func currentRouteSnapshot() -> String {
+    struct RouteState: Equatable {
+        struct DeviceIdentity: Equatable {
+            let id: AudioDeviceID?
+            let name: String
+            let uid: String
+            let transport: String
+            let nominalHz: String
+            let inputChannels: UInt32
+            let outputChannels: UInt32
+            let alive: String
+            let inputSourceID: UInt32?
+            let inputSourceName: String
+
+            var snapshot: String {
+                [
+                    "id=\(id.map(String.init) ?? "none")",
+                    "name=\(name)",
+                    "uid=\(uid)",
+                    "transport=\(transport)",
+                    "nominalHz=\(nominalHz)",
+                    "in=\(inputChannels)",
+                    "out=\(outputChannels)",
+                    "alive=\(alive)",
+                    "inputSourceID=\(inputSourceID.map(String.init) ?? "unknown")",
+                    "inputSource=\(inputSourceName)"
+                ].joined(separator: " ")
+            }
+        }
+
+        let defaultInput: DeviceIdentity
+        let defaultOutput: DeviceIdentity
+        let builtInMic: DeviceIdentity
+        let defaultInputIsBluetooth: Bool
+        let defaultOutputIsBluetooth: Bool
+        let activeRouteInvolvesBluetooth: Bool
+        let availableDeviceCount: Int
+
+        var fingerprint: String {
+            [
+                "inID=\(defaultInput.id.map(String.init) ?? "none")",
+                "inUID=\(defaultInput.uid)",
+                "inSrc=\(defaultInput.inputSourceID.map(String.init) ?? "unknown")",
+                "outID=\(defaultOutput.id.map(String.init) ?? "none")",
+                "outUID=\(defaultOutput.uid)",
+                "inTransport=\(defaultInput.transport)",
+                "outTransport=\(defaultOutput.transport)",
+                "inHz=\(defaultInput.nominalHz)",
+                "outHz=\(defaultOutput.nominalHz)",
+                "btIn=\(AppDiagnostics.boolLabel(defaultInputIsBluetooth))",
+                "btOut=\(AppDiagnostics.boolLabel(defaultOutputIsBluetooth))",
+                "btRoute=\(AppDiagnostics.boolLabel(activeRouteInvolvesBluetooth))",
+                "deviceCount=\(availableDeviceCount)"
+            ].joined(separator: "|")
+        }
+
+        var inputSelectionSnapshot: String {
+            [
+                "inputSelection={",
+                "defaultInputIsBluetooth=\(AppDiagnostics.boolLabel(defaultInputIsBluetooth))",
+                "defaultOutputIsBluetooth=\(AppDiagnostics.boolLabel(defaultOutputIsBluetooth))",
+                "defaultInputTransport=\(defaultInput.transport)",
+                "builtInMicAvailable=\(AppDiagnostics.boolLabel(builtInMic.id != nil))",
+                "defaultInputMatchesBuiltInMic=\(AppDiagnostics.boolLabel(defaultInput.id != nil && defaultInput.id == builtInMic.id))",
+                "activeRouteInvolvesBluetooth=\(AppDiagnostics.boolLabel(activeRouteInvolvesBluetooth))",
+                "}"
+            ].joined(separator: " ")
+        }
+
+        var routeSnapshot: String {
+            [
+                "defaultInput={\(defaultInput.snapshot)}",
+                "defaultOutput={\(defaultOutput.snapshot)}",
+                "builtInMic={\(builtInMic.snapshot)}",
+                "routeFingerprint=\(fingerprint)",
+                inputSelectionSnapshot
+            ].joined(separator: " ")
+        }
+    }
+
+    static func currentRouteState() -> RouteState {
+        let devices = allDevices()
         let defaultInputDevice = defaultDevice(selector: kAudioHardwarePropertyDefaultInputDevice)
         let defaultOutputDevice = defaultDevice(selector: kAudioHardwarePropertyDefaultOutputDevice)
-        let builtInMicDevice = findBuiltInMicDevice()
-        let defaultInput = describeDevice(defaultInputDevice)
-        let defaultOutput = describeDevice(defaultOutputDevice)
-        let builtInMic = describeDevice(builtInMicDevice)
+        let builtInMicDevice = findBuiltInMicDevice(in: devices)
+        let defaultInput = deviceIdentity(defaultInputDevice)
+        let defaultOutput = deviceIdentity(defaultOutputDevice)
+        let builtInMic = deviceIdentity(builtInMicDevice)
 
-        return [
-            "defaultInput={\(defaultInput)}",
-            "defaultOutput={\(defaultOutput)}",
-            "builtInMic={\(builtInMic)}",
-            inputSelectionSnapshot(defaultInput: defaultInputDevice, builtInMic: builtInMicDevice)
-        ].joined(separator: " ")
+        let defaultInputIsBluetooth = isBluetoothTransport(device: defaultInputDevice)
+        let defaultOutputIsBluetooth = isBluetoothTransport(device: defaultOutputDevice)
+
+        return RouteState(
+            defaultInput: defaultInput,
+            defaultOutput: defaultOutput,
+            builtInMic: builtInMic,
+            defaultInputIsBluetooth: defaultInputIsBluetooth,
+            defaultOutputIsBluetooth: defaultOutputIsBluetooth,
+            activeRouteInvolvesBluetooth: defaultInputIsBluetooth || defaultOutputIsBluetooth,
+            availableDeviceCount: devices.count
+        )
+    }
+
+    static func currentRouteSnapshot() -> String {
+        currentRouteState().routeSnapshot
+    }
+
+    static func routeFingerprint() -> String {
+        currentRouteState().fingerprint
+    }
+
+    static func activeInputSnapshot() -> String {
+        currentRouteState().defaultInput.snapshot
+    }
+
+    static func activeOutputSnapshot() -> String {
+        currentRouteState().defaultOutput.snapshot
     }
 
     static func availableDevicesSnapshot() -> String {
         let devices = allDevices()
         guard !devices.isEmpty else { return "none" }
-        return devices.map { "{\(describeDevice($0))}" }.joined(separator: " ")
+        return devices.map { "{\(deviceIdentity($0).snapshot)}" }.joined(separator: " ")
+    }
+
+    static func routeTransitionSummary(
+        from oldState: RouteState?,
+        to newState: RouteState,
+        inventoryChanged: Bool = false
+    ) -> String {
+        guard let oldState else {
+            return [
+                "observerInitialized",
+                "defaultInputChanged",
+                "defaultOutputChanged",
+                inventoryChanged ? "deviceInventoryChanged" : nil
+            ]
+            .compactMap { $0 }
+            .joined(separator: ",")
+        }
+
+        var changes: [String] = []
+        if oldState.defaultInput.id != newState.defaultInput.id {
+            changes.append("defaultInputChanged")
+        }
+        if oldState.defaultOutput.id != newState.defaultOutput.id {
+            changes.append("defaultOutputChanged")
+        }
+        if oldState.defaultInput.uid != newState.defaultInput.uid {
+            changes.append("defaultInputUIDChanged")
+        }
+        if oldState.defaultOutput.uid != newState.defaultOutput.uid {
+            changes.append("defaultOutputUIDChanged")
+        }
+        if oldState.defaultInput.nominalHz != newState.defaultInput.nominalHz {
+            changes.append("defaultInputSampleRateChanged")
+        }
+        if oldState.defaultOutput.nominalHz != newState.defaultOutput.nominalHz {
+            changes.append("defaultOutputSampleRateChanged")
+        }
+        if oldState.defaultInput.inputSourceID != newState.defaultInput.inputSourceID {
+            changes.append("defaultInputSourceChanged")
+        }
+        if oldState.defaultInputIsBluetooth != newState.defaultInputIsBluetooth {
+            changes.append("defaultInputBluetoothChanged")
+        }
+        if oldState.defaultOutputIsBluetooth != newState.defaultOutputIsBluetooth {
+            changes.append("defaultOutputBluetoothChanged")
+        }
+        if oldState.activeRouteInvolvesBluetooth != newState.activeRouteInvolvesBluetooth {
+            changes.append("bluetoothInvolvementChanged")
+        }
+        if inventoryChanged || oldState.availableDeviceCount != newState.availableDeviceCount {
+            changes.append("deviceInventoryChanged")
+        }
+
+        return changes.isEmpty ? "noEffectiveRouteChange" : changes.joined(separator: ",")
     }
 
     static func findBuiltInMicDevice() -> AudioDeviceID? {
-        allDevices().first { device in
-            transportType(for: device) == kAudioDeviceTransportTypeBuiltIn && channelCount(device, scope: kAudioObjectPropertyScopeInput) > 0
-        }
+        findBuiltInMicDevice(in: allDevices())
     }
 
     static func defaultInputIsBluetooth() -> Bool {
-        guard let device = defaultDevice(selector: kAudioHardwarePropertyDefaultInputDevice),
-              let transport = transportType(for: device) else {
-            return false
-        }
-
-        return transport == kAudioDeviceTransportTypeBluetooth || transport == kAudioDeviceTransportTypeBluetoothLE
+        isBluetoothTransport(device: defaultDevice(selector: kAudioHardwarePropertyDefaultInputDevice))
     }
 
     static func defaultOutputIsBluetooth() -> Bool {
-        guard let device = defaultDevice(selector: kAudioHardwarePropertyDefaultOutputDevice),
-              let transport = transportType(for: device) else {
-            return false
-        }
-
-        return transport == kAudioDeviceTransportTypeBluetooth || transport == kAudioDeviceTransportTypeBluetoothLE
+        isBluetoothTransport(device: defaultDevice(selector: kAudioHardwarePropertyDefaultOutputDevice))
     }
 
     static func activeRouteInvolvesBluetooth() -> Bool {
@@ -53,22 +197,27 @@ enum AudioDeviceDiagnostics {
     }
 
     static func inputSelectionSnapshot(defaultInput: AudioDeviceID? = nil, builtInMic: AudioDeviceID? = nil) -> String {
-        let resolvedDefaultInput = defaultInput ?? defaultDevice(selector: kAudioHardwarePropertyDefaultInputDevice)
-        let resolvedBuiltInMic = builtInMic ?? findBuiltInMicDevice()
-        let defaultTransport = transportLabel(resolvedDefaultInput.flatMap(transportType(for:)))
-        let builtInAvailable = resolvedBuiltInMic != nil
-        let defaultIsBuiltInMic = resolvedDefaultInput != nil && resolvedDefaultInput == resolvedBuiltInMic
+        let state = currentRouteState()
+        if let defaultInput, let builtInMic {
+            let defaultIdentity = deviceIdentity(defaultInput)
+            let builtInIdentity = deviceIdentity(builtInMic)
+            return RouteState(
+                defaultInput: defaultIdentity,
+                defaultOutput: state.defaultOutput,
+                builtInMic: builtInIdentity,
+                defaultInputIsBluetooth: isBluetoothTransport(device: defaultInput),
+                defaultOutputIsBluetooth: state.defaultOutputIsBluetooth,
+                activeRouteInvolvesBluetooth: isBluetoothTransport(device: defaultInput) || state.defaultOutputIsBluetooth,
+                availableDeviceCount: state.availableDeviceCount
+            ).inputSelectionSnapshot
+        }
+        return state.inputSelectionSnapshot
+    }
 
-        return [
-            "inputSelection={",
-            "defaultInputIsBluetooth=\(AppDiagnostics.boolLabel(defaultInputIsBluetooth()))",
-            "defaultOutputIsBluetooth=\(AppDiagnostics.boolLabel(defaultOutputIsBluetooth()))",
-            "defaultInputTransport=\(defaultTransport)",
-            "builtInMicAvailable=\(AppDiagnostics.boolLabel(builtInAvailable))",
-            "defaultInputMatchesBuiltInMic=\(AppDiagnostics.boolLabel(defaultIsBuiltInMic))",
-            "activeRouteInvolvesBluetooth=\(AppDiagnostics.boolLabel(activeRouteInvolvesBluetooth()))",
-            "}"
-        ].joined(separator: " ")
+    private static func findBuiltInMicDevice(in devices: [AudioDeviceID]) -> AudioDeviceID? {
+        devices.first { device in
+            transportType(for: device) == kAudioDeviceTransportTypeBuiltIn && channelCount(device, scope: kAudioObjectPropertyScopeInput) > 0
+        }
     }
 
     private static func allDevices() -> [AudioDeviceID] {
@@ -107,8 +256,21 @@ enum AudioDeviceDiagnostics {
         return deviceID
     }
 
-    private static func describeDevice(_ device: AudioDeviceID?) -> String {
-        guard let device else { return "none" }
+    private static func deviceIdentity(_ device: AudioDeviceID?) -> RouteState.DeviceIdentity {
+        guard let device else {
+            return .init(
+                id: nil,
+                name: "none",
+                uid: "none",
+                transport: "none",
+                nominalHz: "unknown",
+                inputChannels: 0,
+                outputChannels: 0,
+                alive: "unknown",
+                inputSourceID: nil,
+                inputSourceName: "unknown"
+            )
+        }
 
         let name = stringProperty(device, selector: kAudioObjectPropertyName, scope: kAudioObjectPropertyScopeGlobal) ?? "unknown"
         let uid = stringProperty(device, selector: kAudioDevicePropertyDeviceUID, scope: kAudioObjectPropertyScopeGlobal) ?? "unknown"
@@ -116,22 +278,68 @@ enum AudioDeviceDiagnostics {
         let transport = transportLabel(transportType(for: device))
         let inputChannels = channelCount(device, scope: kAudioObjectPropertyScopeInput)
         let outputChannels = channelCount(device, scope: kAudioObjectPropertyScopeOutput)
-        let alive = uint32Property(device, selector: kAudioDevicePropertyDeviceIsAlive, scope: kAudioObjectPropertyScopeGlobal)
+        let aliveValue = uint32Property(device, selector: kAudioDevicePropertyDeviceIsAlive, scope: kAudioObjectPropertyScopeGlobal)
+        let inputSourceID = inputDataSourceID(device)
+        let inputSourceName = inputDataSourceName(device, sourceID: inputSourceID) ?? "unknown"
 
-        return [
-            "id=\(device)",
-            "name=\(name)",
-            "uid=\(uid)",
-            "transport=\(transport)",
-            "nominalHz=\(sampleRate.map { String(format: "%.1f", $0) } ?? "unknown")",
-            "in=\(inputChannels)",
-            "out=\(outputChannels)",
-            "alive=\(alive == nil ? "unknown" : (alive == 0 ? "no" : "yes"))"
-        ].joined(separator: " ")
+        return .init(
+            id: device,
+            name: name,
+            uid: uid,
+            transport: transport,
+            nominalHz: sampleRate.map { String(format: "%.1f", $0) } ?? "unknown",
+            inputChannels: inputChannels,
+            outputChannels: outputChannels,
+            alive: aliveValue == nil ? "unknown" : (aliveValue == 0 ? "no" : "yes"),
+            inputSourceID: inputSourceID,
+            inputSourceName: inputSourceName
+        )
+    }
+
+    private static func isBluetoothTransport(device: AudioDeviceID?) -> Bool {
+        guard let device, let transport = transportType(for: device) else {
+            return false
+        }
+
+        return transport == kAudioDeviceTransportTypeBluetooth || transport == kAudioDeviceTransportTypeBluetoothLE
     }
 
     private static func transportType(for device: AudioDeviceID) -> UInt32? {
         uint32Property(device, selector: kAudioDevicePropertyTransportType, scope: kAudioObjectPropertyScopeGlobal)
+    }
+
+    private static func inputDataSourceID(_ device: AudioDeviceID) -> UInt32? {
+        uint32Property(device, selector: kAudioDevicePropertyDataSource, scope: kAudioDevicePropertyScopeInput)
+    }
+
+    private static func inputDataSourceName(_ device: AudioDeviceID, sourceID: UInt32?) -> String? {
+        guard let sourceID else { return nil }
+
+        var source = sourceID
+        var cfName: Unmanaged<CFString>?
+        var translation = withUnsafeMutablePointer(to: &source) { sourcePointer in
+            withUnsafeMutablePointer(to: &cfName) { namePointer in
+                AudioValueTranslation(
+                    mInputData: UnsafeMutableRawPointer(sourcePointer),
+                    mInputDataSize: UInt32(MemoryLayout<UInt32>.size),
+                    mOutputData: UnsafeMutableRawPointer(namePointer),
+                    mOutputDataSize: UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+                )
+            }
+        }
+
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyDataSourceNameForIDCFString,
+            mScope: kAudioDevicePropertyScopeInput,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var size = UInt32(MemoryLayout<AudioValueTranslation>.size)
+        guard AudioObjectGetPropertyData(device, &address, 0, nil, &size, &translation) == noErr,
+              let unmanagedName = cfName else {
+            return nil
+        }
+
+        return unmanagedName.takeRetainedValue() as String
     }
 
     private static func transportLabel(_ value: UInt32?) -> String {

@@ -37,6 +37,16 @@ import CoreAudio
 import Foundation
 import os
 
+struct RecordingSessionForensics {
+    let routeAtStartFingerprint: String
+    let routeAtStopFingerprint: String
+    let routeAtStopSnapshot: String
+    let lastKnownInputSnapshot: String
+    let lastKnownOutputSnapshot: String
+    let routeChangedDuringSession: Bool
+    let captureStalledDuringSession: Bool
+}
+
 @Observable
 @MainActor
 final class AudioRecorder {
@@ -51,12 +61,22 @@ final class AudioRecorder {
     private var outputURL: URL?
     private var recordingStartTime: TimeInterval?
     private var durationTimer: Timer?
+    private var heartbeatTimer: Timer?
     private var configObserver: NSObjectProtocol?
     private var noAudioWatchdog: Timer?
 
     /// Stored for tap reinstallation after config changes.
     private var activeTargetFormat: AVAudioFormat?
     private var activeRouteInvolvesBluetooth = false
+    private var routeFingerprintAtStart = "unknown"
+    private var lastLoggedRouteFingerprint = "unknown"
+    private var lastKnownInputSnapshot = "unknown"
+    private var lastKnownOutputSnapshot = "unknown"
+    private var lastKnownRouteSnapshot = "unknown"
+    private var lastKnownRouteState: AudioDeviceDiagnostics.RouteState?
+    private var sessionObservedRouteChange = false
+    private var sessionObservedCaptureStall = false
+    private var lastHeartbeatFramesWritten: Int64 = 0
 
     var onRecordingFailed: ((String) -> Void)?
     var onRecordingStable: (() -> Void)?
@@ -83,10 +103,11 @@ final class AudioRecorder {
         let tempDir = FileManager.default.temporaryDirectory
         let fileName = "dictatr_\(Int(Date().timeIntervalSince1970)).wav"
         let fileURL = tempDir.appendingPathComponent(fileName)
+        let startRouteState = AudioDeviceDiagnostics.currentRouteState()
 
         AppDiagnostics.info(
             .audioRecorder,
-            "recording start requested session=\(sessionID) outputFile=\(fileURL.lastPathComponent) route=\(AudioDeviceDiagnostics.currentRouteSnapshot()) devices=\(AudioDeviceDiagnostics.availableDevicesSnapshot())"
+            "recording start requested session=\(sessionID) outputFile=\(fileURL.lastPathComponent) routeFingerprint=\(startRouteState.fingerprint) activeInput={\(startRouteState.defaultInput.snapshot)} activeOutput={\(startRouteState.defaultOutput.snapshot)} route=\(startRouteState.routeSnapshot) devices=\(AudioDeviceDiagnostics.availableDevicesSnapshot())"
         )
 
         let engine = AVAudioEngine()
@@ -95,7 +116,7 @@ final class AudioRecorder {
         let inputFormat = inputNode.outputFormat(forBus: 0)
         AppDiagnostics.info(
             .audioRecorder,
-            "recording start preflight session=\(sessionID) inputFormat={\(Self.describe(format: inputFormat))}"
+            "recording start preflight session=\(sessionID) inputFormat={\(Self.describe(format: inputFormat))} currentDefaultInput={\(startRouteState.defaultInput.snapshot)} currentDefaultOutput={\(startRouteState.defaultOutput.snapshot)} bluetoothRoute=\(AppDiagnostics.boolLabel(startRouteState.activeRouteInvolvesBluetooth))"
         )
 
         // Target format: 16kHz mono Float32 (what Whisper expects)
@@ -119,7 +140,15 @@ final class AudioRecorder {
         self.outputFile = file
         self.outputURL = fileURL
         self.activeTargetFormat = targetFormat
-        self.activeRouteInvolvesBluetooth = AudioDeviceDiagnostics.activeRouteInvolvesBluetooth()
+        self.activeRouteInvolvesBluetooth = startRouteState.activeRouteInvolvesBluetooth
+        self.routeFingerprintAtStart = startRouteState.fingerprint
+        self.lastLoggedRouteFingerprint = startRouteState.fingerprint
+        self.lastKnownInputSnapshot = startRouteState.defaultInput.snapshot
+        self.lastKnownOutputSnapshot = startRouteState.defaultOutput.snapshot
+        self.lastKnownRouteSnapshot = startRouteState.routeSnapshot
+        self.sessionObservedRouteChange = false
+        self.sessionObservedCaptureStall = false
+        self.lastHeartbeatFramesWritten = 0
         self._isCapturing.withLock { $0 = true }
         self._framesWritten.withLock { $0 = 0 }
         self._droppedFrames.withLock { $0 = 0 }
@@ -151,9 +180,11 @@ final class AudioRecorder {
 
         do {
             try engine.start()
+            let engineStartedRouteState = AudioDeviceDiagnostics.currentRouteState()
+            updateRouteTracking(with: engineStartedRouteState)
             AppDiagnostics.info(
                 .audioRecorder,
-                "engine started session=\(sessionID) tapInstalled=\(formatValid) file=\(fileURL.lastPathComponent) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
+                "engine started session=\(sessionID) tapInstalled=\(formatValid) file=\(fileURL.lastPathComponent) routeFingerprintAtStart=\(routeFingerprintAtStart) routeFingerprintAtEngineStart=\(engineStartedRouteState.fingerprint) routeChangedBeforeEngineStart=\(AppDiagnostics.boolLabel(routeFingerprintAtStart != engineStartedRouteState.fingerprint)) activeInput={\(engineStartedRouteState.defaultInput.snapshot)} activeOutput={\(engineStartedRouteState.defaultOutput.snapshot)} route=\(engineStartedRouteState.routeSnapshot)"
             )
         } catch {
             AppDiagnostics.error(
@@ -181,6 +212,12 @@ final class AudioRecorder {
             Task { @MainActor in
                 guard let self, let start = self.recordingStartTime else { return }
                 self.recordingDuration = ProcessInfo.processInfo.systemUptime - start
+            }
+        }
+
+        heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.emitRecordingHeartbeat()
             }
         }
 
@@ -271,12 +308,16 @@ final class AudioRecorder {
         let frames = _framesWritten.withLock { $0 }
         let dropped = _droppedFrames.withLock { $0 }
         let elapsed = elapsedRecordingTime()
+        let previousFingerprint = lastLoggedRouteFingerprint
+        let previousRouteState = lastKnownRouteState
+        let currentRouteState = AudioDeviceDiagnostics.currentRouteState()
+        updateRouteTracking(with: currentRouteState)
         AppDiagnostics.warning(
             .audioRecorder,
-            "config change received session=\(recordingSessionID ?? "none") engineRunning=\(engine.isRunning) elapsed=\(elapsed) frames=\(frames) dropped=\(dropped) route=\(AudioDeviceDiagnostics.currentRouteSnapshot()) devices=\(AudioDeviceDiagnostics.availableDevicesSnapshot())"
+            "config change received session=\(recordingSessionID ?? "none") engineRunning=\(engine.isRunning) elapsed=\(elapsed) frames=\(frames) dropped=\(dropped) previousRouteFingerprint=\(previousFingerprint) currentRouteFingerprint=\(currentRouteState.fingerprint) transition=\(AudioDeviceDiagnostics.routeTransitionSummary(from: previousRouteState, to: currentRouteState)) activeInput={\(currentRouteState.defaultInput.snapshot)} activeOutput={\(currentRouteState.defaultOutput.snapshot)} route=\(currentRouteState.routeSnapshot) devices=\(AudioDeviceDiagnostics.availableDevicesSnapshot())"
         )
 
-        let routeInvolvesBluetooth = activeRouteInvolvesBluetooth || AudioDeviceDiagnostics.activeRouteInvolvesBluetooth()
+        let routeInvolvesBluetooth = activeRouteInvolvesBluetooth || currentRouteState.activeRouteInvolvesBluetooth
 
         if routeInvolvesBluetooth {
             AppDiagnostics.warning(
@@ -352,7 +393,7 @@ final class AudioRecorder {
         }
     }
 
-    func stopRecording() -> (url: URL, duration: TimeInterval, framesWritten: Int64)? {
+    func stopRecording() -> (url: URL, duration: TimeInterval, framesWritten: Int64, forensics: RecordingSessionForensics)? {
         guard isRecording, let url = outputURL else { return nil }
         let sessionID = recordingSessionID ?? "none"
 
@@ -367,6 +408,9 @@ final class AudioRecorder {
         durationTimer?.invalidate()
         durationTimer = nil
 
+        heartbeatTimer?.invalidate()
+        heartbeatTimer = nil
+
         noAudioWatchdog?.invalidate()
         noAudioWatchdog = nil
 
@@ -379,6 +423,8 @@ final class AudioRecorder {
 
         let frames = _framesWritten.withLock { $0 }
         let dropped = _droppedFrames.withLock { $0 }
+        let stopRouteState = AudioDeviceDiagnostics.currentRouteState()
+        updateRouteTracking(with: stopRouteState)
 
         if let engine = audioEngine {
             if engine.isRunning {
@@ -396,11 +442,21 @@ final class AudioRecorder {
 
         AppDiagnostics.info(
             .audioRecorder,
-            "recording stopped session=\(sessionID) duration=\(String(format: "%.3f", duration))s frames=\(frames) dropped=\(dropped) file=\(url.lastPathComponent) route=\(AudioDeviceDiagnostics.currentRouteSnapshot()) fileExists=\(AppDiagnostics.boolLabel(FileManager.default.fileExists(atPath: url.path)))"
+            "recording stopped session=\(sessionID) duration=\(String(format: "%.3f", duration))s frames=\(frames) dropped=\(dropped) file=\(url.lastPathComponent) routeAtStartFingerprint=\(routeFingerprintAtStart) routeAtStopFingerprint=\(stopRouteState.fingerprint) routeChangedDuringSession=\(AppDiagnostics.boolLabel(sessionObservedRouteChange)) stalledHeartbeatObserved=\(AppDiagnostics.boolLabel(sessionObservedCaptureStall)) lastKnownInput={\(lastKnownInputSnapshot)} lastKnownOutput={\(lastKnownOutputSnapshot)} route=\(stopRouteState.routeSnapshot) fileExists=\(AppDiagnostics.boolLabel(FileManager.default.fileExists(atPath: url.path)))"
         )
+        let forensics = RecordingSessionForensics(
+            routeAtStartFingerprint: routeFingerprintAtStart,
+            routeAtStopFingerprint: stopRouteState.fingerprint,
+            routeAtStopSnapshot: stopRouteState.routeSnapshot,
+            lastKnownInputSnapshot: lastKnownInputSnapshot,
+            lastKnownOutputSnapshot: lastKnownOutputSnapshot,
+            routeChangedDuringSession: sessionObservedRouteChange,
+            captureStalledDuringSession: sessionObservedCaptureStall
+        )
+        resetSessionForensics()
         recordingSessionID = nil
 
-        return (url, duration, frames)
+        return (url, duration, frames, forensics)
     }
 
     /// Unconditionally resets all recording state. Does NOT return the recording.
@@ -422,6 +478,9 @@ final class AudioRecorder {
         durationTimer?.invalidate()
         durationTimer = nil
 
+        heartbeatTimer?.invalidate()
+        heartbeatTimer = nil
+
         noAudioWatchdog?.invalidate()
         noAudioWatchdog = nil
 
@@ -441,6 +500,7 @@ final class AudioRecorder {
         isRecording = false
         recordingDuration = 0
         recordingSessionID = nil
+        resetSessionForensics()
 
         if let url = outputURL {
             try? FileManager.default.removeItem(at: url)
@@ -463,6 +523,9 @@ final class AudioRecorder {
         self.recordingDuration = 0
         self.recordingStartTime = nil
         self.recordingSessionID = nil
+        self.heartbeatTimer?.invalidate()
+        self.heartbeatTimer = nil
+        resetSessionForensics()
         try? FileManager.default.removeItem(at: fileURL)
     }
 
@@ -470,9 +533,11 @@ final class AudioRecorder {
         guard isRecording else { return }
         let frames = _framesWritten.withLock { $0 }
         if frames < 800 {
+            let routeState = AudioDeviceDiagnostics.currentRouteState()
+            updateRouteTracking(with: routeState)
             AppDiagnostics.error(
                 .audioRecorder,
-                "watchdog fired session=\(recordingSessionID ?? "none") frames=\(frames) dropped=\(_droppedFrames.withLock { $0 }) elapsed=\(elapsedRecordingTime()) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
+                "watchdog fired session=\(recordingSessionID ?? "none") frames=\(frames) dropped=\(_droppedFrames.withLock { $0 }) elapsed=\(elapsedRecordingTime()) routeFingerprint=\(routeState.fingerprint) stalledHeartbeatObserved=\(AppDiagnostics.boolLabel(sessionObservedCaptureStall)) lastKnownInput={\(lastKnownInputSnapshot)} lastKnownOutput={\(lastKnownOutputSnapshot)} route=\(routeState.routeSnapshot)"
             )
             let message = "No audio captured after 5 seconds. Check your microphone or try reconnecting your headphones."
             forceReset(reason: "watchdog no audio after 5 seconds")
@@ -489,6 +554,58 @@ final class AudioRecorder {
     private func elapsedRecordingTime() -> String {
         guard let start = recordingStartTime else { return "unknown" }
         return String(format: "%.3fs", ProcessInfo.processInfo.systemUptime - start)
+    }
+
+    private func emitRecordingHeartbeat() {
+        guard isRecording else { return }
+        let sessionID = recordingSessionID ?? "none"
+        let frames = _framesWritten.withLock { $0 }
+        let dropped = _droppedFrames.withLock { $0 }
+        let delta = frames - lastHeartbeatFramesWritten
+        lastHeartbeatFramesWritten = frames
+        let captureStalled = delta <= 0
+        if captureStalled {
+            sessionObservedCaptureStall = true
+        }
+
+        let routeState = AudioDeviceDiagnostics.currentRouteState()
+        let previousFingerprint = lastLoggedRouteFingerprint
+        updateRouteTracking(with: routeState)
+
+        let baseMessage =
+            "recording heartbeat session=\(sessionID) elapsed=\(elapsedRecordingTime()) engineRunning=\(AppDiagnostics.boolLabel(audioEngine?.isRunning ?? false)) frames=\(frames) dropped=\(dropped) deltaFrames=\(delta) captureStalled=\(AppDiagnostics.boolLabel(captureStalled)) routeFingerprint=\(routeState.fingerprint) activeInput={\(routeState.defaultInput.snapshot)} activeOutput={\(routeState.defaultOutput.snapshot)} bluetoothInput=\(AppDiagnostics.boolLabel(routeState.defaultInputIsBluetooth)) bluetoothOutput=\(AppDiagnostics.boolLabel(routeState.defaultOutputIsBluetooth)) bluetoothRoute=\(AppDiagnostics.boolLabel(routeState.activeRouteInvolvesBluetooth))"
+
+        if previousFingerprint != routeState.fingerprint {
+            AppDiagnostics.info(
+                .audioRecorder,
+                "\(baseMessage) routeFingerprintChanged=yes previousRouteFingerprint=\(previousFingerprint) route=\(routeState.routeSnapshot)"
+            )
+        } else {
+            AppDiagnostics.info(.audioRecorder, baseMessage)
+        }
+    }
+
+    private func updateRouteTracking(with routeState: AudioDeviceDiagnostics.RouteState) {
+        if lastLoggedRouteFingerprint != "unknown", lastLoggedRouteFingerprint != routeState.fingerprint {
+            sessionObservedRouteChange = true
+        }
+        lastLoggedRouteFingerprint = routeState.fingerprint
+        lastKnownInputSnapshot = routeState.defaultInput.snapshot
+        lastKnownOutputSnapshot = routeState.defaultOutput.snapshot
+        lastKnownRouteSnapshot = routeState.routeSnapshot
+        lastKnownRouteState = routeState
+    }
+
+    private func resetSessionForensics() {
+        routeFingerprintAtStart = "unknown"
+        lastLoggedRouteFingerprint = "unknown"
+        lastKnownInputSnapshot = "unknown"
+        lastKnownOutputSnapshot = "unknown"
+        lastKnownRouteSnapshot = "unknown"
+        lastKnownRouteState = nil
+        sessionObservedRouteChange = false
+        sessionObservedCaptureStall = false
+        lastHeartbeatFramesWritten = 0
     }
 
     private static func describe(format: AVAudioFormat) -> String {

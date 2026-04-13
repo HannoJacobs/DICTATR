@@ -140,6 +140,7 @@ final class AppState {
     let transcriptionEngine = TranscriptionEngine()
     let databaseManager: DatabaseManager?
 
+    private let audioRouteObserver: AudioRouteObserver
     private var hotkeyManager: HotkeyManager?
     private var httpServer: LocalHTTPServer?
     private var modelLoadTask: Task<Void, Never>?
@@ -197,6 +198,8 @@ final class AppState {
     }
 
     init() {
+        self.audioRouteObserver = AudioRouteObserver()
+
         // Register defaults (idempotent, never overwrites explicit user choices)
         UserDefaults.standard.register(defaults: ["autoPasteEnabled": true])
 
@@ -225,7 +228,7 @@ final class AppState {
             "AppState audio snapshot route=\(AudioDeviceDiagnostics.currentRouteSnapshot()) devices=\(AudioDeviceDiagnostics.availableDevicesSnapshot())"
         )
 
-        refreshPermissionStates()
+        refreshPermissionStates(source: "init")
 
         // Wire up auto-stop callback from AudioRecorder (watchdog timeout, engine failure)
         audioRecorder.onRecordingFailed = { [weak self] message in
@@ -252,7 +255,7 @@ final class AppState {
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor in
-                self?.refreshPermissionStates()
+                self?.refreshPermissionStates(source: "appDidBecomeActive")
             }
         }
 
@@ -279,12 +282,19 @@ final class AppState {
         startModelDownload()
     }
 
-    func refreshPermissionStates() {
-        microphonePermissionStatus = MicrophonePermissionManager.authorizationState()
+    func refreshPermissionStates(source: String = "unspecified") {
+        let previousStatus = microphonePermissionStatus
+        let refreshedStatus = MicrophonePermissionManager.authorizationState()
+        let level: (DiagnosticCategory, String) -> Void = previousStatus == refreshedStatus ? AppDiagnostics.debug : AppDiagnostics.info
+        level(
+            .appState,
+            "microphone permission refresh source=\(source) previous=\(previousStatus.rawValue) current=\(refreshedStatus.rawValue)"
+        )
+        microphonePermissionStatus = refreshedStatus
     }
 
     func handleMicrophonePermissionAction(source: String) async {
-        refreshPermissionStates()
+        refreshPermissionStates(source: "\(source):preAction")
         switch microphonePermissionStatus {
         case .authorized:
             AppDiagnostics.info(.appState, "Microphone permission already authorized source=\(source)")
@@ -292,8 +302,8 @@ final class AppState {
         case .notDetermined:
             AppDiagnostics.info(.appState, "Requesting microphone permission source=\(source)")
             statusMessage = "Requesting microphone access..."
-            let granted = await MicrophonePermissionManager.requestAccess()
-            refreshPermissionStates()
+            let granted = await MicrophonePermissionManager.requestAccess(source: source)
+            refreshPermissionStates(source: "\(source):postPrompt")
             if granted {
                 AppDiagnostics.info(.appState, "Microphone permission granted source=\(source)")
                 if currentState == .idle, !isModelLoading {
@@ -314,7 +324,7 @@ final class AppState {
             errorMessage = microphonePermissionStatus == .restricted
                 ? "Microphone access is restricted by macOS or device policy."
                 : "Settings → search \"Privacy\" → Microphone → toggle DICTATR on"
-            MicrophonePermissionManager.openSettings()
+            MicrophonePermissionManager.openSettings(source: source)
         }
     }
 
@@ -392,7 +402,7 @@ final class AppState {
     }
 
     private func startRecording() async {
-        refreshPermissionStates()
+        refreshPermissionStates(source: "startRecording")
         switch microphonePermissionStatus {
         case .authorized:
             break
@@ -400,8 +410,8 @@ final class AppState {
             AppDiagnostics.info(.appState, "startRecording requesting microphone permission before capture")
             statusMessage = "Requesting microphone access..."
             errorMessage = nil
-            let granted = await MicrophonePermissionManager.requestAccess()
-            refreshPermissionStates()
+            let granted = await MicrophonePermissionManager.requestAccess(source: "startRecording")
+            refreshPermissionStates(source: "startRecording:postPrompt")
             guard !Task.isCancelled else { return }
             guard granted, microphonePermissionStatus.isAuthorized else {
                 statusMessage = "Microphone access required"
@@ -533,7 +543,7 @@ final class AppState {
 
     private func retryStartRecording() {
         guard transcriptionEngine.isModelLoaded else { return }
-        refreshPermissionStates()
+        refreshPermissionStates(source: "retryStartRecording")
         guard microphonePermissionStatus.isAuthorized else {
             currentState = .idle
             statusMessage = "Microphone access required"
@@ -600,7 +610,7 @@ final class AppState {
 
         AppDiagnostics.info(
             .appState,
-            "recording stopped session=\(sessionID) duration=\(String(format: "%.3f", result.duration))s frames=\(result.framesWritten) file=\(result.url.lastPathComponent) snapshot={\(stateSnapshot())}"
+            "recording stopped session=\(sessionID) duration=\(String(format: "%.3f", result.duration))s frames=\(result.framesWritten) file=\(result.url.lastPathComponent) routeAtStopFingerprint=\(result.forensics.routeAtStopFingerprint) routeChangedDuringSession=\(AppDiagnostics.boolLabel(result.forensics.routeChangedDuringSession)) stalledHeartbeatObserved=\(AppDiagnostics.boolLabel(result.forensics.captureStalledDuringSession)) snapshot={\(stateSnapshot())}"
         )
 
         let signalStats = Self.analyzeAudioSignal(at: result.url)
@@ -646,6 +656,14 @@ final class AppState {
         recordingIndicator.showProcessing()
         currentState = .transcribing
         statusMessage = "Transcribing..."
+
+        let transcriptionStartRoute = AudioDeviceDiagnostics.currentRouteState()
+        let silentDespiteFrames = result.framesWritten > 0 && (signalStats?.sampleCount ?? 0) > 0 &&
+            ((signalStats?.rms ?? 0) <= 0.000_001 && (signalStats?.peak ?? 0) <= 0.000_001)
+        AppDiagnostics.info(
+            .appState,
+            "recording forensic summary session=\(sessionID) routeAtStartFingerprint=\(result.forensics.routeAtStartFingerprint) routeAtStopFingerprint=\(result.forensics.routeAtStopFingerprint) routeAtTranscriptionStartFingerprint=\(transcriptionStartRoute.fingerprint) routeChangedDuringSession=\(AppDiagnostics.boolLabel(result.forensics.routeChangedDuringSession)) routeChangedBeforeTranscription=\(AppDiagnostics.boolLabel(result.forensics.routeAtStopFingerprint != transcriptionStartRoute.fingerprint)) stalledHeartbeatObserved=\(AppDiagnostics.boolLabel(result.forensics.captureStalledDuringSession)) silentDespiteNonZeroFrames=\(AppDiagnostics.boolLabel(silentDespiteFrames)) lastKnownInput={\(result.forensics.lastKnownInputSnapshot)} lastKnownOutput={\(result.forensics.lastKnownOutputSnapshot)} routeAtStop={\(result.forensics.routeAtStopSnapshot)} routeAtTranscriptionStart={\(transcriptionStartRoute.routeSnapshot)}"
+        )
 
         // Cancel any lingering previous transcription task
         transcriptionTask?.cancel()

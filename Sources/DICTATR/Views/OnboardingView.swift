@@ -108,7 +108,7 @@ struct OnboardingView: View {
     }
 
     private func checkPermissions() {
-        appState.refreshPermissionStates()
+        appState.refreshPermissionStates(source: "onboardingAppear")
         microphoneGranted = MicrophonePermissionManager.authorizationState().isAuthorized
 
         // Check accessibility
