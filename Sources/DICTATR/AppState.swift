@@ -49,6 +49,7 @@ final class AppState {
 
     var currentState: DictationState = .idle {
         didSet {
+            RecordingDiagnostics.shared.setRecorderState(currentState)
             logObservableChange(
                 name: "currentState",
                 oldValue: String(describing: oldValue),
@@ -148,6 +149,7 @@ final class AppState {
     private var autoRetryTask: Task<Void, Never>?
     private var recordingStartTask: Task<Void, Never>?
     private var autoRetryCount = 0
+    private var activeRecoveryCycleID: String?
     /// True while a reconnect retry is scheduled or sleeping. Prevents an HFP "storm"
     /// (many `onRecordingFailed` callbacks in one burst) from burning the whole retry budget.
     private var recordingRecoveryPending = false
@@ -199,6 +201,7 @@ final class AppState {
 
     init() {
         self.audioRouteObserver = AudioRouteObserver()
+        RecordingDiagnostics.shared.setRecorderState(.idle)
 
         // Register defaults (idempotent, never overwrites explicit user choices)
         UserDefaults.standard.register(defaults: ["autoPasteEnabled": true])
@@ -231,8 +234,8 @@ final class AppState {
         refreshPermissionStates(source: "init")
 
         // Wire up auto-stop callback from AudioRecorder (watchdog timeout, engine failure)
-        audioRecorder.onRecordingFailed = { [weak self] message in
-            self?.handleRecordingFailure(message: message)
+        audioRecorder.onRecordingFailed = { [weak self] event in
+            self?.handleRecordingFailure(event: event)
         }
 
         // Reset retry counter once recording is confirmed stable (5s watchdog passed).
@@ -364,9 +367,10 @@ final class AppState {
     }
 
     func toggleRecording() {
+        RecordingDiagnostics.shared.setRecorderState(currentState)
         AppDiagnostics.info(
             .appState,
-            "toggleRecording currentState=\(String(describing: currentState)) retryCount=\(autoRetryCount) recoveryPending=\(recordingRecoveryPending) snapshot={\(stateSnapshot())}"
+            "toggleRecording context={\(RecordingDiagnostics.shared.contextSnapshot())} currentState=\(String(describing: currentState)) retryCount=\(autoRetryCount) recoveryPending=\(recordingRecoveryPending) snapshot={\(stateSnapshot())}"
         )
         switch currentState {
         case .idle:
@@ -377,16 +381,22 @@ final class AppState {
                 return
             }
             if recordingRecoveryPending {
+                RecordingDiagnostics.shared.recordRetryDecision(
+                    .duplicateFailureCoalesced,
+                    detail: "cause=user_hotkey snapshot={\(stateSnapshot())}"
+                )
                 statusMessage = "Reconnecting..."
                 errorMessage = "Microphone recovery is already in progress. Please wait."
                 AppDiagnostics.warning(
                     .appState,
-                    "toggleRecording ignored because microphone recovery is already pending retryCount=\(autoRetryCount) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
+                    "toggleRecording ignored because microphone recovery is already pending context={\(RecordingDiagnostics.shared.contextSnapshot())} retryCount=\(autoRetryCount) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
                 )
                 return
             }
             autoRetryCount = 0
+            activeRecoveryCycleID = nil
             recordingRecoveryPending = false
+            RecordingDiagnostics.shared.clearRecoveryState()
             autoRetryTask?.cancel()
             recordingStartTask = Task { @MainActor [weak self] in
                 guard let self else { return }
@@ -394,6 +404,7 @@ final class AppState {
                 await self.startRecording()
             }
         case .recording:
+            RecordingDiagnostics.shared.recordRecorderEvent("manual_stop_requested", detail: "cause=user_hotkey context={\(RecordingDiagnostics.shared.contextSnapshot())}")
             stopRecordingAndTranscribe()
         case .transcribing:
             // Ignore while transcribing
@@ -446,10 +457,10 @@ final class AppState {
 
         AppDiagnostics.info(
             .appState,
-            "startRecording requested retryCount=\(autoRetryCount) snapshot={\(stateSnapshot())} devices=\(AudioDeviceDiagnostics.availableDevicesSnapshot())"
+            "startRecording requested context={\(RecordingDiagnostics.shared.contextSnapshot(extra: ["cause": "user_hotkey"]))} retryCount=\(autoRetryCount) snapshot={\(stateSnapshot())} devices=\(AudioDeviceDiagnostics.availableDevicesSnapshot())"
         )
         do {
-            let url = try audioRecorder.startRecording()
+            let url = try audioRecorder.startRecording(metadata: .userHotkey)
             currentState = .recording
             statusMessage = "Recording..."
             errorMessage = nil
@@ -457,15 +468,21 @@ final class AppState {
             recordingIndicator.show(audioRecorder: audioRecorder)
             AppDiagnostics.info(
                 .appState,
-                "recording started session=\(audioRecorder.recordingSessionID ?? "none") file=\(url.lastPathComponent) snapshot={\(stateSnapshot())}"
+                "recording started context={\(RecordingDiagnostics.shared.contextSnapshot(extra: ["cause": "user_hotkey"]))} session=\(audioRecorder.recordingSessionID ?? "none") file=\(url.lastPathComponent) snapshot={\(stateSnapshot())}"
             )
         } catch {
             currentState = .idle
             statusMessage = "Ready"
             errorMessage = "Failed to start recording: \(error.localizedDescription)"
+            let reason = RecordingFailureReason.from(error: error)
+            RecordingDiagnostics.shared.recordRecorderEvent(
+                "attempt_failed_before_recording",
+                detail: "reason=\(reason.rawValue) error=\(AppDiagnostics.quoted(error.localizedDescription))"
+            )
+            RecordingDiagnostics.shared.dumpBreadcrumbs(reason: "engine_start_failed")
             AppDiagnostics.error(
                 .appState,
-                "recording failed to start error=\(error.localizedDescription) snapshot={\(stateSnapshot())} devices=\(AudioDeviceDiagnostics.availableDevicesSnapshot())"
+                "recording failed to start context={\(RecordingDiagnostics.shared.contextSnapshot())} reason=\(reason.rawValue) error=\(error.localizedDescription) snapshot={\(stateSnapshot())} devices=\(AudioDeviceDiagnostics.availableDevicesSnapshot())"
             )
         }
     }
@@ -474,25 +491,61 @@ final class AppState {
     // Max 3 failure *events* (after coalescing). A reboot "fixes" Bluetooth/HFP because
     // Core Audio clears stuck state; we approximate that with longer settle delays after
     // route-churn messages, not by rebooting the Mac (apps can't).
-    private func handleRecordingFailure(message: String) {
+    private func handleRecordingFailure(event: RecordingFailureEvent) {
+        let sessionID = audioRecorder.recordingSessionID ?? "none"
+        let recoveryCycleID = activeRecoveryCycleID ?? RecordingDiagnostics.shared.beginRecoveryCycleIfNeeded(recordingSessionID: sessionID)
+        activeRecoveryCycleID = recoveryCycleID
+
         if recordingRecoveryPending {
+            RecordingDiagnostics.shared.recordFailureEvent(
+                RecordingFailureEvent(
+                    reason: .duplicateFailureWhileRecoveryPending,
+                    userMessage: RecordingFailureReason.duplicateFailureWhileRecoveryPending.defaultUserMessage,
+                    framesWritten: event.framesWritten,
+                    droppedFrames: event.droppedFrames,
+                    routeState: event.routeState,
+                    captureSnapshot: event.captureSnapshot,
+                    detail: "originalReason=\(event.reason.rawValue) \(event.detail)"
+                ),
+                retryBudgetBefore: autoRetryCount,
+                retryBudgetAfter: autoRetryCount,
+                budgetConsumed: false,
+                coalescedIntoExistingRecovery: true
+            )
+            RecordingDiagnostics.shared.recordRetryDecision(
+                .duplicateFailureCoalesced,
+                detail: "reason=\(event.reason.rawValue) retryBudgetBefore=\(autoRetryCount) retryBudgetAfter=\(autoRetryCount) recoveryCycle=\(recoveryCycleID)"
+            )
             AppDiagnostics.warning(
                 .appState,
-                "Ignoring duplicate recording failure while recovery already scheduled message=\(message) retryCount=\(autoRetryCount) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
+                "Ignoring duplicate recording failure while recovery already scheduled context={\(RecordingDiagnostics.shared.contextSnapshot())} reason=\(event.reason.rawValue) retryCount=\(autoRetryCount) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
             )
             return
         }
 
+        let retryBudgetBefore = autoRetryCount
+        let retryBudgetAfter = autoRetryCount + (event.reason.retryBudgetConsumes ? 1 : 0)
+        RecordingDiagnostics.shared.recordFailureEvent(
+            event,
+            retryBudgetBefore: retryBudgetBefore,
+            retryBudgetAfter: retryBudgetAfter,
+            budgetConsumed: event.reason.retryBudgetConsumes,
+            coalescedIntoExistingRecovery: false
+        )
         AppDiagnostics.error(
             .appState,
-            "Recording auto-stopped session=\(audioRecorder.recordingSessionID ?? "none") message=\(AppDiagnostics.quoted(message, limit: 400)) retryCountBeforeIncrement=\(autoRetryCount) snapshot={\(stateSnapshot())} devices=\(AudioDeviceDiagnostics.availableDevicesSnapshot())"
+            "Recording auto-stopped context={\(RecordingDiagnostics.shared.contextSnapshot())} session=\(sessionID) reason=\(event.reason.rawValue) reasonCategory=\(event.reason.reasonCategory) isBluetoothRelated=\(AppDiagnostics.boolLabel(event.reason.isBluetoothRelated)) isRecoverable=\(AppDiagnostics.boolLabel(event.reason.isRecoverable)) retryBudgetConsumes=\(AppDiagnostics.boolLabel(event.reason.retryBudgetConsumes)) userMessage=\(AppDiagnostics.quoted(event.userMessage, limit: 400)) retryCountBeforeIncrement=\(autoRetryCount) capture={\(event.captureSnapshot.snapshot)} snapshot={\(stateSnapshot())} devices=\(AudioDeviceDiagnostics.availableDevicesSnapshot())"
         )
-        autoRetryCount += 1
+        autoRetryCount = retryBudgetAfter
 
         if autoRetryCount > 3 {
+            RecordingDiagnostics.shared.recordRetryDecision(
+                .retryBudgetExceeded,
+                detail: "reason=\(event.reason.rawValue) retryBudgetBefore=\(retryBudgetBefore) retryBudgetAfter=\(autoRetryCount) recoveryCycle=\(recoveryCycleID)"
+            )
             AppDiagnostics.error(
                 .appState,
-                "Exceeded max retries retryCount=\(self.autoRetryCount) snapshot={\(stateSnapshot())} availableDevices=\(AudioDeviceDiagnostics.availableDevicesSnapshot())"
+                "Exceeded max retries context={\(RecordingDiagnostics.shared.contextSnapshot())} retryCount=\(self.autoRetryCount) snapshot={\(stateSnapshot())} availableDevices=\(AudioDeviceDiagnostics.availableDevicesSnapshot())"
             )
             recordingRecoveryPending = false
             autoRetryTask?.cancel()
@@ -500,18 +553,28 @@ final class AppState {
             statusMessage = "Recording failed"
             errorMessage = "Microphone unavailable. Try disconnecting and reconnecting your headphones."
             recordingIndicator.hide()
+            RecordingDiagnostics.shared.dumpBreadcrumbs(reason: "retry_budget_exhausted")
+            RecordingDiagnostics.shared.emitIncidentSummary(outcome: "failed", failureReason: .retryBudgetExhausted)
+            activeRecoveryCycleID = nil
             return
         }
 
-        let delaySeconds = Self.delayBeforeReconnectAttempt(message: message, attempt: autoRetryCount)
+        let routeStabilityRequiredMs = event.reason.isBluetoothRelated ? 1500 : 600
+        let delaySeconds = Self.delayBeforeReconnectAttempt(reason: event.reason, attempt: autoRetryCount)
+        let baseDelayMs = Int(delaySeconds * 1000)
 
+        RecordingDiagnostics.shared.recordRetryDecision(
+            .retryScheduled,
+            detail: "reason=\(event.reason.rawValue) retryBudgetBefore=\(retryBudgetBefore) retryBudgetAfter=\(autoRetryCount) baseDelayMs=\(baseDelayMs) extraDelayForBluetoothMs=\(event.reason.isBluetoothRelated ? baseDelayMs : 0) extraDelayForRecentRouteChurnMs=0 finalDelayMs=\(baseDelayMs) decisionRuleVersion=2 recoveryCycle=\(recoveryCycleID)"
+        )
         AppDiagnostics.warning(
             .appState,
-            "Scheduling retry on current route delay=\(String(format: "%.1f", delaySeconds))s retryCount=\(autoRetryCount) message=\(AppDiagnostics.quoted(message, limit: 400)) snapshot={\(stateSnapshot())}"
+            "Scheduling retry on current route context={\(RecordingDiagnostics.shared.contextSnapshot())} delay=\(String(format: "%.1f", delaySeconds))s retryCount=\(autoRetryCount) reason=\(event.reason.rawValue) userMessage=\(AppDiagnostics.quoted(event.userMessage, limit: 400)) snapshot={\(stateSnapshot())}"
         )
         currentState = .idle
         statusMessage = "Reconnecting..."
         recordingIndicator.showReconnecting()
+        RecordingDiagnostics.shared.setRecoveringState()
 
         recordingRecoveryPending = true
         autoRetryTask?.cancel()
@@ -520,25 +583,29 @@ final class AppState {
             guard let self else { return }
             guard !Task.isCancelled, self.currentState == .idle else {
                 self.recordingRecoveryPending = false
-                AppDiagnostics.info(.appState, "Route retry cancelled before execution")
+                RecordingDiagnostics.shared.recordRetryDecision(
+                    .retryAbortedDueToStateChange,
+                    detail: "reason=\(event.reason.rawValue) recoveryCycle=\(recoveryCycleID)"
+                )
+                AppDiagnostics.info(.appState, "Route retry cancelled before execution context={\(RecordingDiagnostics.shared.contextSnapshot())}")
                 return
             }
+            await self.waitForStableRouteBeforeRetry(
+                reason: event.reason,
+                recoveryCycleID: recoveryCycleID,
+                requiredStableWindowMs: routeStabilityRequiredMs
+            )
             self.recordingRecoveryPending = false
             self.retryStartRecording()
         }
     }
 
     /// Longer delay after route / HFP churn (similar to what a reboot indirectly provides: time to settle).
-    private static func delayBeforeReconnectAttempt(message: String, attempt: Int) -> TimeInterval {
-        let routeChurn =
-            message.localizedCaseInsensitiveContains("audio device") ||
-            message.localizedCaseInsensitiveContains("reconnecting") ||
-            message.localizedCaseInsensitiveContains("device changed")
-
+    private static func delayBeforeReconnectAttempt(reason: RecordingFailureReason, attempt: Int) -> TimeInterval {
         if attempt == 1 {
-            return routeChurn ? 2.5 : 1.0
+            return reason.isBluetoothRelated ? 2.5 : 1.0
         }
-        return routeChurn ? 2.0 : 1.5
+        return reason.isBluetoothRelated ? 2.0 : 1.5
     }
 
     private func retryStartRecording() {
@@ -551,34 +618,122 @@ final class AppState {
                 ? "Microphone access is restricted by macOS or device policy."
                 : "Settings → search \"Privacy\" → Microphone → toggle DICTATR on"
             recordingIndicator.hide()
+            RecordingDiagnostics.shared.recordRetryDecision(
+                .retryAbortedDueToPermissionChange,
+                detail: "status=\(microphonePermissionStatus.rawValue) recoveryCycle=\(activeRecoveryCycleID ?? "none")"
+            )
             AppDiagnostics.warning(
                 .appState,
-                "retryStartRecording blocked because microphone access is unavailable status=\(microphonePermissionStatus.rawValue)"
+                "retryStartRecording blocked because microphone access is unavailable context={\(RecordingDiagnostics.shared.contextSnapshot())} status=\(microphonePermissionStatus.rawValue)"
             )
             return
         }
+        RecordingDiagnostics.shared.recordRetryDecision(
+            .retryStarted,
+            detail: "retryCount=\(autoRetryCount) recoveryCycle=\(activeRecoveryCycleID ?? "none") lastObservedRouteChangeMsAgo=\(RecordingDiagnostics.shared.millisecondsSinceLastRouteChange())"
+        )
         AppDiagnostics.info(
             .appState,
-            "retryStartRecording retryCount=\(autoRetryCount) snapshot={\(stateSnapshot())} devices=\(AudioDeviceDiagnostics.availableDevicesSnapshot())"
+            "retryStartRecording context={\(RecordingDiagnostics.shared.contextSnapshot())} retryCount=\(autoRetryCount) snapshot={\(stateSnapshot())} devices=\(AudioDeviceDiagnostics.availableDevicesSnapshot())"
         )
 
         do {
-            let url = try audioRecorder.startRecording()
+            let url = try audioRecorder.startRecording(
+                metadata: RecordingAttemptMetadata(
+                    trigger: "retry_scheduler",
+                    recoveryCycleID: activeRecoveryCycleID,
+                    retryAttempt: autoRetryCount
+                )
+            )
             currentState = .recording
             statusMessage = "Recording..."
             errorMessage = nil
             recordingIndicator.show(audioRecorder: audioRecorder)
+            RecordingDiagnostics.shared.recordRetryDecision(
+                .retrySucceeded,
+                detail: "retryCount=\(autoRetryCount) recoveryCycle=\(activeRecoveryCycleID ?? "none")"
+            )
+            RecordingDiagnostics.shared.completeRecoveryCycleIfNeeded()
+            activeRecoveryCycleID = nil
             AppDiagnostics.info(
                 .appState,
-                "retry succeeded session=\(audioRecorder.recordingSessionID ?? "none") file=\(url.lastPathComponent) snapshot={\(stateSnapshot())}"
+                "retry succeeded context={\(RecordingDiagnostics.shared.contextSnapshot())} session=\(audioRecorder.recordingSessionID ?? "none") file=\(url.lastPathComponent) snapshot={\(stateSnapshot())}"
             )
         } catch {
+            let reason = RecordingFailureReason.from(error: error)
+            RecordingDiagnostics.shared.recordRetryDecision(
+                .retryFailed,
+                detail: "reason=\(reason.rawValue) retryCount=\(autoRetryCount) recoveryCycle=\(activeRecoveryCycleID ?? "none")"
+            )
             AppDiagnostics.error(
                 .appState,
-                "retry failed error=\(error.localizedDescription) retryCount=\(autoRetryCount) snapshot={\(stateSnapshot())} devices=\(AudioDeviceDiagnostics.availableDevicesSnapshot())"
+                "retry failed context={\(RecordingDiagnostics.shared.contextSnapshot())} reason=\(reason.rawValue) error=\(error.localizedDescription) retryCount=\(autoRetryCount) snapshot={\(stateSnapshot())} devices=\(AudioDeviceDiagnostics.availableDevicesSnapshot())"
             )
-            handleRecordingFailure(message: error.localizedDescription)
+            handleRecordingFailure(
+                event: RecordingFailureEvent(
+                    reason: reason,
+                    userMessage: reason.defaultUserMessage,
+                    framesWritten: 0,
+                    droppedFrames: 0,
+                    routeState: AudioDeviceDiagnostics.currentRouteState(),
+                    captureSnapshot: CaptureCadenceSnapshot(
+                        firstTapCallbackMs: nil,
+                        tapCallbackCount: 0,
+                        lastTapCallbackMsAgo: nil,
+                        buffersReceived: 0,
+                        buffersConverted: 0,
+                        buffersDropped: 0,
+                        framesReceivedRaw: 0,
+                        framesConverted: 0,
+                        framesWritten: 0,
+                        largestInputBufferFrames: 0,
+                        smallestInputBufferFrames: 0,
+                        avgCallbackIntervalMs: nil,
+                        timeSinceFirstTapMs: nil,
+                        timeSinceLastTapMs: nil,
+                        timeSinceLastFrameWriteMs: nil,
+                        captureState: "never_started",
+                        firstNonZeroWriteMs: nil
+                    ),
+                    detail: "retry start failed error=\(error.localizedDescription)"
+                )
+            )
         }
+    }
+
+    private func waitForStableRouteBeforeRetry(
+        reason: RecordingFailureReason,
+        recoveryCycleID: String,
+        requiredStableWindowMs: Int
+    ) async {
+        RecordingDiagnostics.shared.recordRetryDecision(
+            .retryWaitStarted,
+            detail: "reason=\(reason.rawValue) route_considered_stable=no stableWindowMs=\(requiredStableWindowMs) recoveryCycle=\(recoveryCycleID)"
+        )
+        var extensions = 0
+        while extensions < 3 {
+            let lastObservedRouteChangeMsAgo = RecordingDiagnostics.shared.millisecondsSinceLastRouteChange()
+            if lastObservedRouteChangeMsAgo >= requiredStableWindowMs {
+                RecordingDiagnostics.shared.recordRetryDecision(
+                    .retryWaitCompleted,
+                    detail: "reason=\(reason.rawValue) route_considered_stable=yes stableWindowMs=\(requiredStableWindowMs) lastObservedRouteChangeMsAgo=\(lastObservedRouteChangeMsAgo) recoveryCycle=\(recoveryCycleID)"
+                )
+                return
+            }
+
+            let extraDelayMs = requiredStableWindowMs - lastObservedRouteChangeMsAgo + 200
+            extensions += 1
+            RecordingDiagnostics.shared.recordRetryDecision(
+                .retryWaitExtendedDueToRouteChange,
+                detail: "reason=\(reason.rawValue) extraDelayForRecentRouteChurnMs=\(extraDelayMs) stableWindowMs=\(requiredStableWindowMs) lastObservedRouteChangeMsAgo=\(lastObservedRouteChangeMsAgo) recoveryCycle=\(recoveryCycleID)"
+            )
+            try? await Task.sleep(for: .milliseconds(extraDelayMs))
+        }
+
+        RecordingDiagnostics.shared.recordRetryDecision(
+            .retryWaitCompleted,
+            detail: "reason=\(reason.rawValue) route_considered_stable=no stableWindowMs=\(requiredStableWindowMs) lastObservedRouteChangeMsAgo=\(RecordingDiagnostics.shared.millisecondsSinceLastRouteChange()) recoveryCycle=\(recoveryCycleID)"
+        )
     }
 
     private func httpTranscriptionEngine() throws -> TranscriptionEngine {
@@ -610,7 +765,7 @@ final class AppState {
 
         AppDiagnostics.info(
             .appState,
-            "recording stopped session=\(sessionID) duration=\(String(format: "%.3f", result.duration))s frames=\(result.framesWritten) file=\(result.url.lastPathComponent) routeAtStopFingerprint=\(result.forensics.routeAtStopFingerprint) routeChangedDuringSession=\(AppDiagnostics.boolLabel(result.forensics.routeChangedDuringSession)) stalledHeartbeatObserved=\(AppDiagnostics.boolLabel(result.forensics.captureStalledDuringSession)) snapshot={\(stateSnapshot())}"
+            "recording stopped context={\(RecordingDiagnostics.shared.contextSnapshot())} session=\(sessionID) duration=\(String(format: "%.3f", result.duration))s frames=\(result.framesWritten) capture={\(result.forensics.captureSnapshot.snapshot)} file=\(result.url.lastPathComponent) routeAtStopFingerprint=\(result.forensics.routeAtStopFingerprint) routeChangedDuringSession=\(AppDiagnostics.boolLabel(result.forensics.routeChangedDuringSession)) stalledHeartbeatObserved=\(AppDiagnostics.boolLabel(result.forensics.captureStalledDuringSession)) snapshot={\(stateSnapshot())}"
         )
 
         let signalStats = Self.analyzeAudioSignal(at: result.url)
@@ -662,7 +817,7 @@ final class AppState {
             ((signalStats?.rms ?? 0) <= 0.000_001 && (signalStats?.peak ?? 0) <= 0.000_001)
         AppDiagnostics.info(
             .appState,
-            "recording forensic summary session=\(sessionID) routeAtStartFingerprint=\(result.forensics.routeAtStartFingerprint) routeAtStopFingerprint=\(result.forensics.routeAtStopFingerprint) routeAtTranscriptionStartFingerprint=\(transcriptionStartRoute.fingerprint) routeChangedDuringSession=\(AppDiagnostics.boolLabel(result.forensics.routeChangedDuringSession)) routeChangedBeforeTranscription=\(AppDiagnostics.boolLabel(result.forensics.routeAtStopFingerprint != transcriptionStartRoute.fingerprint)) stalledHeartbeatObserved=\(AppDiagnostics.boolLabel(result.forensics.captureStalledDuringSession)) silentDespiteNonZeroFrames=\(AppDiagnostics.boolLabel(silentDespiteFrames)) lastKnownInput={\(result.forensics.lastKnownInputSnapshot)} lastKnownOutput={\(result.forensics.lastKnownOutputSnapshot)} routeAtStop={\(result.forensics.routeAtStopSnapshot)} routeAtTranscriptionStart={\(transcriptionStartRoute.routeSnapshot)}"
+            "recording forensic summary context={\(RecordingDiagnostics.shared.contextSnapshot())} session=\(sessionID) capture={\(result.forensics.captureSnapshot.snapshot)} routeAtStartFingerprint=\(result.forensics.routeAtStartFingerprint) routeAtStopFingerprint=\(result.forensics.routeAtStopFingerprint) routeAtTranscriptionStartFingerprint=\(transcriptionStartRoute.fingerprint) routeChangedDuringSession=\(AppDiagnostics.boolLabel(result.forensics.routeChangedDuringSession)) routeChangedBeforeTranscription=\(AppDiagnostics.boolLabel(result.forensics.routeAtStopFingerprint != transcriptionStartRoute.fingerprint)) stalledHeartbeatObserved=\(AppDiagnostics.boolLabel(result.forensics.captureStalledDuringSession)) silentDespiteNonZeroFrames=\(AppDiagnostics.boolLabel(silentDespiteFrames)) lastKnownInput={\(result.forensics.lastKnownInputSnapshot)} lastKnownOutput={\(result.forensics.lastKnownOutputSnapshot)} routeAtStop={\(result.forensics.routeAtStopSnapshot)} routeAtTranscriptionStart={\(transcriptionStartRoute.routeSnapshot)}"
         )
 
         // Cancel any lingering previous transcription task

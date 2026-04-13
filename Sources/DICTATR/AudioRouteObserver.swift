@@ -19,9 +19,18 @@ final class AudioRouteObserver {
     init() {
         installSystemListeners()
         refreshObservedDeviceListeners()
+        let observation = RecordingDiagnostics.shared.observeRouteChange(
+            currentRouteState,
+            trigger: "observer_init",
+            inventoryChanged: false,
+            affectsActiveRecording: false,
+            affectsInputPath: true,
+            affectsOutputPath: true,
+            likelyRecoverableWithoutRestart: true
+        )
         AppDiagnostics.info(
             .audioDevices,
-            "audio route observer started routeFingerprint=\(currentRouteState.fingerprint) route=\(currentRouteState.routeSnapshot) devices=\(AudioDeviceDiagnostics.availableDevicesSnapshot())"
+            "audio route observer started context={\(RecordingDiagnostics.shared.contextSnapshot(extra: ["routeEpoch": String(observation.routeEpoch)]))} routeFingerprint=\(currentRouteState.fingerprint) bluetoothModeGuess=\(observation.bluetoothModeAssessment.mode.rawValue) route=\(currentRouteState.routeSnapshot) devices=\(AudioDeviceDiagnostics.availableDevicesSnapshot())"
         )
     }
 
@@ -203,14 +212,29 @@ final class AudioRouteObserver {
         currentRouteState = newState
         refreshObservedDeviceListeners()
 
-        let transition = AudioDeviceDiagnostics.routeTransitionSummary(
+        let changedFields = AudioDeviceDiagnostics.routeChangedFields(
             from: previousState,
             to: newState,
             inventoryChanged: inventoryChanged
         )
+        let affectsInputPath = changedFields.contains(where: { $0.contains("Input") || $0 == "bluetoothModeChanged" })
+        let affectsOutputPath = changedFields.contains(where: { $0.contains("Output") || $0 == "bluetoothModeChanged" })
+        let affectsActiveRecording = RecordingDiagnostics.shared.isActivelyRecordingOrRecovering()
+        let likelyRecoverableWithoutRestart = newState.activeRouteInvolvesBluetooth && changedFields.allSatisfy {
+            $0 == "defaultOutputSampleRateChanged" || $0 == "bluetoothModeChanged" || $0 == "noEffectiveRouteChange"
+        }
+        let observation = RecordingDiagnostics.shared.observeRouteChange(
+            newState,
+            trigger: trigger,
+            inventoryChanged: inventoryChanged,
+            affectsActiveRecording: affectsActiveRecording,
+            affectsInputPath: affectsInputPath,
+            affectsOutputPath: affectsOutputPath,
+            likelyRecoverableWithoutRestart: likelyRecoverableWithoutRestart
+        )
 
         let message =
-            "audio route observer trigger=\(trigger) transition=\(transition) previousFingerprint=\(previousState.fingerprint) currentFingerprint=\(newState.fingerprint) previousInput={\(previousState.defaultInput.snapshot)} currentInput={\(newState.defaultInput.snapshot)} previousOutput={\(previousState.defaultOutput.snapshot)} currentOutput={\(newState.defaultOutput.snapshot)} route=\(newState.routeSnapshot)"
+            "audio route observer trigger=\(trigger) transition=\(observation.changedFields.joined(separator: ",")) context={\(RecordingDiagnostics.shared.contextSnapshot())} previousFingerprint=\(previousState.fingerprint) currentFingerprint=\(newState.fingerprint) stableForMsBeforeChange=\(observation.stableForMsBeforeChange) timeSinceAttemptStartMs=\(observation.timeSinceAttemptStartMs.map(String.init) ?? "nil") timeSinceEngineStartMs=\(observation.timeSinceEngineStartMs.map(String.init) ?? "nil") bluetoothModeGuess=\(observation.bluetoothModeAssessment.mode.rawValue) outputNominalHz=\(observation.bluetoothModeAssessment.outputNominalHz) inputNominalHz=\(observation.bluetoothModeAssessment.inputNominalHz) modeGuessConfidence=\(observation.bluetoothModeAssessment.confidence) modeGuessReason=\(observation.bluetoothModeAssessment.reason) aggregateDeviceID=\(observation.aggregateDeviceID) affectsActiveRecording=\(AppDiagnostics.boolLabel(affectsActiveRecording)) affectsInputPath=\(AppDiagnostics.boolLabel(affectsInputPath)) affectsOutputPath=\(AppDiagnostics.boolLabel(affectsOutputPath)) likelyRecoverableWithoutRestart=\(AppDiagnostics.boolLabel(likelyRecoverableWithoutRestart)) previousInput={\(previousState.defaultInput.snapshot)} currentInput={\(newState.defaultInput.snapshot)} previousOutput={\(previousState.defaultOutput.snapshot)} currentOutput={\(newState.defaultOutput.snapshot)} route=\(newState.routeSnapshot)"
 
         if includeDevices {
             AppDiagnostics.info(.audioDevices, "\(message) devices=\(AudioDeviceDiagnostics.availableDevicesSnapshot())")

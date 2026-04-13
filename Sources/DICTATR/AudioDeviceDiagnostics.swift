@@ -76,8 +76,83 @@ enum AudioDeviceDiagnostics {
                 "defaultOutput={\(defaultOutput.snapshot)}",
                 "builtInMic={\(builtInMic.snapshot)}",
                 "routeFingerprint=\(fingerprint)",
+                "bluetoothModeGuess=\(bluetoothModeAssessment.mode.rawValue)",
+                "inputNominalHz=\(bluetoothModeAssessment.inputNominalHz)",
+                "outputNominalHz=\(bluetoothModeAssessment.outputNominalHz)",
+                "modeGuessConfidence=\(bluetoothModeAssessment.confidence)",
+                "modeGuessReason=\(bluetoothModeAssessment.reason)",
                 inputSelectionSnapshot
             ].joined(separator: " ")
+        }
+
+        var bluetoothModeAssessment: BluetoothModeAssessment {
+            let inputNominalHz = defaultInput.nominalHz
+            let outputNominalHz = defaultOutput.nominalHz
+            let defaultInputMatchesBuiltIn = defaultInput.id != nil && defaultInput.id == builtInMic.id
+            let outputHzValue = Double(outputNominalHz)
+            let inputHzValue = Double(inputNominalHz)
+
+            if !activeRouteInvolvesBluetooth {
+                return BluetoothModeAssessment(
+                    mode: .unknown,
+                    outputNominalHz: outputNominalHz,
+                    inputNominalHz: inputNominalHz,
+                    confidence: "low",
+                    reason: "active route does not involve bluetooth"
+                )
+            }
+
+            if defaultInputIsBluetooth && defaultOutputIsBluetooth {
+                if let outputHzValue, outputHzValue <= 24000.0 {
+                    return BluetoothModeAssessment(
+                        mode: .hfp,
+                        outputNominalHz: outputNominalHz,
+                        inputNominalHz: inputNominalHz,
+                        confidence: "high",
+                        reason: "bluetooth input active and bluetooth output collapsed to telephony rate"
+                    )
+                }
+
+                if let outputHzValue, outputHzValue >= 44100.0 {
+                    return BluetoothModeAssessment(
+                        mode: .mixed,
+                        outputNominalHz: outputNominalHz,
+                        inputNominalHz: inputNominalHz,
+                        confidence: "medium",
+                        reason: "bluetooth input active while output is still at high-fidelity rate"
+                    )
+                }
+            }
+
+            if defaultOutputIsBluetooth && defaultInputMatchesBuiltIn {
+                if let outputHzValue, outputHzValue >= 44100.0 {
+                    return BluetoothModeAssessment(
+                        mode: .a2dp,
+                        outputNominalHz: outputNominalHz,
+                        inputNominalHz: inputNominalHz,
+                        confidence: "high",
+                        reason: "bluetooth output active while built-in microphone remains selected"
+                    )
+                }
+            }
+
+            if let inputHzValue, let outputHzValue, inputHzValue <= 24000.0, outputHzValue <= 32000.0 {
+                return BluetoothModeAssessment(
+                    mode: .hfp,
+                    outputNominalHz: outputNominalHz,
+                    inputNominalHz: inputNominalHz,
+                    confidence: "medium",
+                    reason: "input and output are both at telephony-like rates"
+                )
+            }
+
+            return BluetoothModeAssessment(
+                mode: .mixed,
+                outputNominalHz: outputNominalHz,
+                inputNominalHz: inputNominalHz,
+                confidence: "low",
+                reason: "bluetooth route present but transport rates do not match a stable profile"
+            )
         }
     }
 
@@ -126,20 +201,27 @@ enum AudioDeviceDiagnostics {
         return devices.map { "{\(deviceIdentity($0).snapshot)}" }.joined(separator: " ")
     }
 
-    static func routeTransitionSummary(
+    static func aggregateDeviceIDsSnapshot() -> String {
+        let devices = allDevices().filter { transportType(for: $0) == kAudioDeviceTransportTypeAggregate }
+        guard !devices.isEmpty else { return "none" }
+        return devices.map { device in
+            let identity = deviceIdentity(device)
+            return "\(identity.id.map(String.init) ?? "none"):\(identity.uid)"
+        }.joined(separator: "|")
+    }
+
+    static func routeChangedFields(
         from oldState: RouteState?,
         to newState: RouteState,
         inventoryChanged: Bool = false
-    ) -> String {
+    ) -> [String] {
         guard let oldState else {
             return [
                 "observerInitialized",
                 "defaultInputChanged",
                 "defaultOutputChanged",
                 inventoryChanged ? "deviceInventoryChanged" : nil
-            ]
-            .compactMap { $0 }
-            .joined(separator: ",")
+            ].compactMap { $0 }
         }
 
         var changes: [String] = []
@@ -173,11 +255,21 @@ enum AudioDeviceDiagnostics {
         if oldState.activeRouteInvolvesBluetooth != newState.activeRouteInvolvesBluetooth {
             changes.append("bluetoothInvolvementChanged")
         }
+        if oldState.bluetoothModeAssessment.mode != newState.bluetoothModeAssessment.mode {
+            changes.append("bluetoothModeChanged")
+        }
         if inventoryChanged || oldState.availableDeviceCount != newState.availableDeviceCount {
             changes.append("deviceInventoryChanged")
         }
+        return changes.isEmpty ? ["noEffectiveRouteChange"] : changes
+    }
 
-        return changes.isEmpty ? "noEffectiveRouteChange" : changes.joined(separator: ",")
+    static func routeTransitionSummary(
+        from oldState: RouteState?,
+        to newState: RouteState,
+        inventoryChanged: Bool = false
+    ) -> String {
+        routeChangedFields(from: oldState, to: newState, inventoryChanged: inventoryChanged).joined(separator: ",")
     }
 
     static func findBuiltInMicDevice() -> AudioDeviceID? {

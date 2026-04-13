@@ -33,6 +33,7 @@ enum DiagnosticCategory: String {
     case hotkey = "Hotkey"
     case database = "Database"
     case audioDevices = "AudioDevices"
+    case forensics = "Forensics"
 }
 
 enum AppDiagnostics {
@@ -47,6 +48,7 @@ enum AppDiagnostics {
     private static let hotkeyLogger = Logger(subsystem: subsystem, category: DiagnosticCategory.hotkey.rawValue)
     private static let databaseLogger = Logger(subsystem: subsystem, category: DiagnosticCategory.database.rawValue)
     private static let audioDevicesLogger = Logger(subsystem: subsystem, category: DiagnosticCategory.audioDevices.rawValue)
+    private static let forensicsLogger = Logger(subsystem: subsystem, category: DiagnosticCategory.forensics.rawValue)
     static let launchSessionID = String(UUID().uuidString.prefix(8)).lowercased()
     static let logFileURL = prepareLogFile()
 
@@ -172,6 +174,8 @@ enum AppDiagnostics {
             return databaseLogger
         case .audioDevices:
             return audioDevicesLogger
+        case .forensics:
+            return forensicsLogger
         }
     }
 
