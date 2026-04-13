@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.27
+- Promoted long blank dictations to explicit errors so any recording that runs for at least 5 seconds and still normalizes to empty text is treated as a real failure in the diagnostics log.
+- Added recording duration to the app-state transcription return/completion logs, along with the full normalized dictated text payload, so blank-output incidents can be correlated directly with how long the user was speaking.
+
 ## 1.26
 - Added aggressive end-to-end diagnostics across DICTATR so future random failures leave a much more complete forensic trail in `latest.log`.
 - App state changes now log old and new values together with a full runtime snapshot, including model state, retry state, frontmost app, and the active audio route.

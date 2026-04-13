@@ -595,7 +595,7 @@ final class AppState {
                 let text = try await self.transcriptionEngine.transcribe(audioURL: result.url)
                 AppDiagnostics.info(
                     .appState,
-                    "transcription returned session=\(sessionID) chars=\(text.count) text=\(AppDiagnostics.quoted(text, limit: 1200)) file=\(result.url.lastPathComponent) snapshot={\(self.stateSnapshot())}"
+                    "transcription returned session=\(sessionID) duration=\(String(format: "%.3f", result.duration))s chars=\(text.count) text=\(AppDiagnostics.quoted(text, limit: 1200)) file=\(result.url.lastPathComponent) snapshot={\(self.stateSnapshot())}"
                 )
 
                 guard !Task.isCancelled else {
@@ -604,7 +604,14 @@ final class AppState {
                 }
 
                 if text.isEmpty {
-                    AppDiagnostics.info(.appState, "transcription returned empty text session=\(sessionID)")
+                    let emptyMessage =
+                        "transcription returned empty text session=\(sessionID) duration=\(String(format: "%.3f", result.duration))s chars=0 text=\(AppDiagnostics.quoted(text, limit: 1200)) file=\(result.url.lastPathComponent) snapshot={\(self.stateSnapshot())}"
+
+                    if result.duration >= 5.0 {
+                        AppDiagnostics.error(.appState, emptyMessage)
+                    } else {
+                        AppDiagnostics.info(.appState, emptyMessage)
+                    }
                     self.recordingIndicator.hide()
                     self.statusMessage = "No speech detected"
                     self.currentState = .idle
@@ -614,7 +621,7 @@ final class AppState {
 
                 AppDiagnostics.info(
                     .appState,
-                    "transcription complete session=\(sessionID) chars=\(text.count) text=\(AppDiagnostics.quoted(text, limit: 1200)) snapshot={\(self.stateSnapshot())}"
+                    "transcription complete session=\(sessionID) duration=\(String(format: "%.3f", result.duration))s chars=\(text.count) text=\(AppDiagnostics.quoted(text, limit: 1200)) snapshot={\(self.stateSnapshot())}"
                 )
                 self.lastTranscription = text
 
