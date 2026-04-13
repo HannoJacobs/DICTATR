@@ -10,6 +10,10 @@
 - Added an explicit `adhoc` release mode for local non-Developer-ID builds. That mode still verifies the shipped app and launch log, but it now explicitly forces the Accessibility re-enable flow because trust persistence is impossible without stable signing.
 - Launch diagnostics now record `accessibilityTrusted=yes|no`, so full-send verification can prove whether the installed app retained Accessibility permission after an upgrade.
 
+## 1.25
+- Filtered placeholder Whisper tokens such as `[BLANK_AUDIO]` out of user-visible transcription results so DICTATR treats them as empty transcription instead of pasting them.
+- Added transcription diagnostics that log both the raw Whisper output text and the normalized text used by DICTATR, so silence and post-processing failures can be debugged from `latest.log`.
+
 ## 1.24
 - Documented the product rule that DICTATR must use the active headphone microphone when headphones are the selected route, and that built-in mic fallback is not an allowed workaround for Bluetooth regressions.
 

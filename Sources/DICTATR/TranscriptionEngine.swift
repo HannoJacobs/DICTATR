@@ -235,11 +235,19 @@ final class TranscriptionEngine {
             decodeOptions: options
         )
 
-        let text = results.map { $0.text.trimmingCharacters(in: .whitespacesAndNewlines) }
+        let segmentTexts = results.map { $0.text.trimmingCharacters(in: .whitespacesAndNewlines) }
+        let text = segmentTexts
             .joined(separator: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
-        return Self.normalizeTranscription(text)
+        let normalized = Self.normalizeTranscription(text)
+
+        AppDiagnostics.info(
+            .transcriptionEngine,
+            "transcribe raw segmentCount=\(results.count) rawText=\(Self.logQuoted(text)) normalizedText=\(Self.logQuoted(normalized))"
+        )
+
+        return normalized
     }
 
     private static func normalizeTranscription(_ text: String) -> String {
@@ -262,6 +270,11 @@ final class TranscriptionEngine {
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
         return cleaned
+    }
+
+    private static func logQuoted(_ text: String) -> String {
+        if text.isEmpty { return "\"\"" }
+        return "\"\(text)\""
     }
 
     private static func selectModel() -> ModelSelection {
