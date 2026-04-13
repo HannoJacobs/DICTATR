@@ -167,7 +167,6 @@ final class AppState {
     var isModelLoading: Bool { transcriptionEngine.isLoading }
     var configuredModelVariant: String { transcriptionEngine.configuredModelVariant }
     var configuredModelPolicySummary: String { transcriptionEngine.configuredModelPolicySummary }
-    var canHardResetAudio: Bool { currentState != .transcribing }
     var shouldShowOnboarding: Bool { !hasCompletedOnboarding || !microphonePermissionStatus.isAuthorized }
 
     private func logObservableChange(name: String, oldValue: String, newValue: String) {
@@ -352,61 +351,6 @@ final class AppState {
         errorMessage = nil
         statusMessage = "Loading model..."
         startModelDownload()
-    }
-
-    func hardResetAudioContention() {
-        guard currentState != .transcribing else {
-            AppDiagnostics.warning(.appState, "hardResetAudioContention ignored during transcription")
-            errorMessage = "Wait for transcription to finish before resetting audio."
-            return
-        }
-
-        AppDiagnostics.warning(
-            .appState,
-            "hardResetAudioContention requested currentState=\(String(describing: currentState)) retryCount=\(autoRetryCount) recoveryPending=\(recordingRecoveryPending) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
-        )
-
-        recordingStartTask?.cancel()
-        recordingStartTask = nil
-        autoRetryTask?.cancel()
-        autoRetryTask = nil
-        recordingRecoveryPending = false
-        autoRetryCount = 0
-        audioRecorder.forceReset(reason: "user requested hard audio reset")
-        recordingIndicator.hide()
-        currentState = .idle
-
-        let result = AudioContentionReset.killLikelyContenders(excluding: [Int32(ProcessInfo.processInfo.processIdentifier)])
-
-        if let inspectionFailure = result.inspectionFailure {
-            statusMessage = "Audio reset failed"
-            errorMessage = inspectionFailure
-            AppDiagnostics.error(.appState, "hard audio reset process inspection failed error=\(inspectionFailure)")
-            return
-        }
-
-        for killed in result.killed {
-            AppDiagnostics.warning(.appState, "hard audio reset killed pid=\(killed.pid) details=\(killed.description)")
-        }
-
-        for skipped in result.skipped {
-            AppDiagnostics.warning(.appState, "hard audio reset skipped \(skipped)")
-        }
-
-        statusMessage = "Audio reset complete"
-        if !result.killed.isEmpty {
-            let suffix = result.killed.count == 1 ? "process" : "processes"
-            errorMessage = "Killed \(result.killed.count) external audio \(suffix). Try dictation again."
-        } else if !result.skipped.isEmpty {
-            errorMessage = "Found external audio processes, but DICTATR could not terminate all of them."
-        } else {
-            errorMessage = "No external Chromium or Electron audio helpers were running."
-        }
-
-        AppDiagnostics.info(
-            .appState,
-            "hard audio reset completed killed=\(result.killed.count) skipped=\(result.skipped.count) message=\(errorMessage ?? "none") route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
-        )
     }
 
     func toggleRecording() {

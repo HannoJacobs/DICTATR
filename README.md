@@ -63,13 +63,14 @@ still take time, but it should no longer block behind the slowest known default 
 # 1. Create release.env from release.env.example
 cp release.env.example release.env
 
-# 2. Build, sign, verify, and package the app bundle:
+# 2. Build, sign, verify, and package the ad-hoc app bundle:
 bash create-dmg.sh
 ```
 
 `create-dmg.sh` now archives the real macOS app bundle from Xcode, signs that `.app`,
 verifies the code identity, and only then packages `DICTATR.dmg`. It no longer wraps a bare
-Mach-O binary into a synthetic app bundle.
+Mach-O binary into a synthetic app bundle. In this repo, ad-hoc signing is the default and
+supported release path.
 
 ### Permissions after installing from DMG
 The Xcode-run app and the shipped `/Applications/DICTATR.app` are still different app
@@ -77,12 +78,10 @@ instances, so the first installed release still needs permissions granted once:
 - **Microphone** — prompted automatically on first use, and may need to be re-granted after an ad-hoc reinstall
 - **Accessibility** — must grant manually in System Settings → Privacy & Security → Accessibility
 
-If you use `DICTATR_CODESIGN_MODE="adhoc"`, upgrades will still require Accessibility to be
-re-enabled after install. Microphone trust may also need to be re-granted. That mode is
-supported for local use, but it cannot preserve trust across releases.
-
-If you use `DICTATR_CODESIGN_MODE="developer_id"` with a stable Developer ID certificate,
-normal upgrades should keep Accessibility trust.
+Released DMGs from this repo are expected to be ad-hoc signed. Upgrades will still require
+Accessibility to be re-enabled after install, and microphone trust may also need to be
+re-granted. This tool is built primarily for self-use, and anyone else using the DMG should
+follow the on-device permission steps after install.
 
 ---
 
@@ -117,10 +116,9 @@ each release, but there is now a single source of truth.
 #    code-path changes, release or permission changes, and concrete verification.
 
 # 2. Create release.env from release.env.example
-#    and set:
-#    - DICTATR_CODESIGN_MODE=adhoc or developer_id
-#    - DICTATR_SPCTL_EXPECT
-#    - DICTATR_CODESIGN_IDENTITY (developer_id mode only)
+#    Default supported values in this repo:
+#    - DICTATR_CODESIGN_MODE=adhoc
+#    - DICTATR_SPCTL_EXPECT=rejected
 
 # 3. Build, sign, verify, and package the DMG
 bash create-dmg.sh
@@ -161,13 +159,17 @@ cp release.env.example release.env
 
 Required values:
 
-- `DICTATR_CODESIGN_MODE` — `adhoc` for local unsigned/ad-hoc releases, or `developer_id` for stable Developer ID signing
+- `DICTATR_CODESIGN_MODE` — `adhoc` for the default supported release flow in this repo
 - `DICTATR_SPCTL_EXPECT` — `accepted`, `rejected`, or `skip`
-- `DICTATR_CODESIGN_IDENTITY` — required only for `developer_id` mode
+
+Optional advanced override:
+
+- `DICTATR_CODESIGN_IDENTITY` — only needed if you deliberately switch to `developer_id` mode yourself
 
 The scripts fail fast if the selected mode is misconfigured. In `adhoc` mode they will build,
-package, install, verify, and then force the Accessibility repair path because trust cannot
-persist across updates with ad-hoc signing.
+package, install, and verify the live installed app from launch-log evidence. If the
+installed launch actually reports `accessibilityTrusted=no`, the installer resets DICTATR's
+TCC entry, opens the Accessibility pane, and fails immediately instead of claiming success.
 
 ### Diagnostics Logs
 
@@ -202,17 +204,6 @@ tail -f ~/Library/Application\ Support/DICTATR/Logs/latest.log
 ls -lt ~/Library/Application\ Support/DICTATR/Logs
 rg -n "watchdog|config change|retry|force reset|recording start" ~/Library/Application\ Support/DICTATR/Logs/latest.log
 ```
-
-If DICTATR is stuck in a Bluetooth / HFP route fight, the menu now includes `Hard Reset Audio`.
-That action does three things together:
-- cancels DICTATR's pending reconnect retries
-- force-resets DICTATR's own `AVAudioEngine` state
-- terminates the owning Chromium/Electron app process when one of its audio helpers is holding the mic route
-
-Expected evidence after using it:
-- `latest.log` should contain `hardResetAudioContention requested`
-- any killed owner processes are logged as `hard audio reset killed pid=...`
-- DICTATR returns to `Audio reset complete` and you can try dictation again immediately
 
 If the app keeps relaunching into `Compiling on-device model...` for multiple minutes,
 check the logged `effectiveVariant` first. A repeated stall on the old large-v3 default is
@@ -323,8 +314,9 @@ reliable tap targets. See `MenuBarView.swift`.
 ### Gatekeeper result depends on notarization state
 
 The release scripts verify whatever signing mode you selected in `release.env`. In `adhoc`
-mode, Gatekeeper rejection is expected. In `developer_id` mode, the observed `spctl` result
-must match the configured expectation instead of being assumed.
+mode, Gatekeeper rejection is expected. That is the default shipped behavior for this repo's
+DMGs. If you deliberately maintain your own `developer_id` setup locally, the observed
+`spctl` result must still match the configured expectation instead of being assumed.
 
 ### Moving the project folder breaks Xcode (no targets / no run destination)
 

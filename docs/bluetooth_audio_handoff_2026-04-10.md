@@ -166,7 +166,6 @@ At the time of handoff, the working tree contains uncommitted changes including:
 - [Sources/DICTATR/AppState.swift](/Users/hannojacobs/Documents/Code/DICTATR/Sources/DICTATR/AppState.swift)
 - [Sources/DICTATR/AudioDeviceDiagnostics.swift](/Users/hannojacobs/Documents/Code/DICTATR/Sources/DICTATR/AudioDeviceDiagnostics.swift)
 - [Sources/DICTATR/Views/MenuBarView.swift](/Users/hannojacobs/Documents/Code/DICTATR/Sources/DICTATR/Views/MenuBarView.swift)
-- [Sources/DICTATR/AudioContentionReset.swift](/Users/hannojacobs/Documents/Code/DICTATR/Sources/DICTATR/AudioContentionReset.swift)
 - [CHANGELOG.md](/Users/hannojacobs/Documents/Code/DICTATR/CHANGELOG.md)
 - [README.md](/Users/hannojacobs/Documents/Code/DICTATR/README.md)
 
