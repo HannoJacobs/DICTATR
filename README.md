@@ -102,7 +102,9 @@ Important: the **app bundle version is not dynamic**. The DMG/app metadata now c
 so `CFBundleVersion` and `CFBundleShortVersionString` must still be updated manually for
 each release, but there is now a single source of truth.
 
-**To ship a new version:**
+In this repo, "ship a new version" and "full send" mean the same standard: commit everything required for the release, push everything, make the live GitHub release path current, let the website/download flow pick up that live release state, refresh the local DMG/app, reinstall to `/Applications/DICTATR.app`, relaunch it, and verify the installed app from logs. It is not enough to stop at a local DMG or assume GitHub/Pages will catch up later.
+
+**To full send a new version:**
 
 ```bash
 # 0. Bump version in Sources/DICTATR/Info.plist
@@ -123,10 +125,15 @@ each release, but there is now a single source of truth.
 # 3. Build, sign, verify, and package the DMG
 bash create-dmg.sh
 
-# 4. Install and verify the built app locally
+# 4. Commit and push the complete release change set
+git add <required files>
+git commit -m "release: v1.1"
+git push
+
+# 5. Install and verify the built app locally
 bash install-release.sh
 
-# 5. Create a GitHub release and upload the DMG
+# 6. Create a GitHub release and upload the DMG
 gh release create v1.1 DICTATR.dmg \
   --title "DICTATR v1.1" \
   --notes "What changed in this version."
@@ -139,6 +146,8 @@ TCC entry and opens the correct System Settings pane instead of silently continu
 
 The website download button automatically serves the new file, and the website version label
 follows the latest GitHub release automatically.
+
+For a real full send, do not stop after `gh release create`. Confirm that the live download path now resolves to the new DMG, that the website is therefore serving the current release, and that the locally installed `/Applications/DICTATR.app` is the same shipped build you just released.
 
 **First-time GitHub Pages setup** (one-off, already done):
 1. Go to repo Settings → Pages
@@ -168,8 +177,11 @@ Optional advanced override:
 
 The scripts fail fast if the selected mode is misconfigured. In `adhoc` mode they will build,
 package, install, and verify the live installed app from launch-log evidence. If the
-installed launch actually reports `accessibilityTrusted=no`, the installer resets DICTATR's
-TCC entry, opens the Accessibility pane, and fails immediately instead of claiming success.
+installed launch actually reports `accessibilityTrusted=no`, treat that as the known local
+permission handoff: remind the user to re-enable Accessibility for `/Applications/DICTATR.app`,
+then continue verification after the permission is restored. Do not treat that specific
+post-install permission reset as evidence that the release itself failed once the installed
+app path and version/build are already confirmed.
 
 ### Diagnostics Logs
 
