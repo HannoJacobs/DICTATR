@@ -225,9 +225,22 @@ final class TranscriptionEngine {
             throw TranscriptionError.modelNotLoaded
         }
 
+        let fileAttributes = (try? FileManager.default.attributesOfItem(atPath: audioURL.path)) ?? [:]
+        let fileSize = (fileAttributes[.size] as? NSNumber)?.intValue ?? 0
+        let creationDate = (fileAttributes[.creationDate] as? Date)?.description ?? "unknown"
+        AppDiagnostics.info(
+            .transcriptionEngine,
+            "transcribe requested file=\(audioURL.lastPathComponent) path=\(audioURL.path) size=\(fileSize)B createdAt=\(creationDate) modelLoaded=\(AppDiagnostics.boolLabel(isModelLoaded)) configuredVariant=\(configuredModelVariant) loadingPhase=\(loadingPhase) loadingDetail=\(loadingDetail)"
+        )
+
         let options = DecodingOptions(
             language: "en",
             wordTimestamps: true
+        )
+
+        AppDiagnostics.info(
+            .transcriptionEngine,
+            "transcribe decode options language=en wordTimestamps=yes file=\(audioURL.lastPathComponent)"
         )
 
         let results = try await pipe.transcribe(
@@ -236,6 +249,9 @@ final class TranscriptionEngine {
         )
 
         let segmentTexts = results.map { $0.text.trimmingCharacters(in: .whitespacesAndNewlines) }
+        let segmentSummaries = results.enumerated().map { index, result in
+            "segment[\(index)] chars=\(result.text.count) text=\(Self.logQuoted(AppDiagnostics.compactText(result.text, limit: 300)))"
+        }.joined(separator: " ")
         let text = segmentTexts
             .joined(separator: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -244,7 +260,7 @@ final class TranscriptionEngine {
 
         AppDiagnostics.info(
             .transcriptionEngine,
-            "transcribe raw segmentCount=\(results.count) rawText=\(Self.logQuoted(text)) normalizedText=\(Self.logQuoted(normalized))"
+            "transcribe raw segmentCount=\(results.count) rawText=\(Self.logQuoted(AppDiagnostics.compactText(text, limit: 1200))) normalizedText=\(Self.logQuoted(AppDiagnostics.compactText(normalized, limit: 1200))) \(segmentSummaries)"
         )
 
         return normalized

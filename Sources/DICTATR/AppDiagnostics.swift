@@ -1,3 +1,4 @@
+import AppKit
 import Darwin
 import Foundation
 import os
@@ -28,6 +29,10 @@ enum DiagnosticCategory: String {
     case transcriptionEngine = "TranscriptionEngine"
     case audioRecorder = "AudioRecorder"
     case httpServer = "HTTPServer"
+    case pasteboard = "Pasteboard"
+    case hotkey = "Hotkey"
+    case database = "Database"
+    case audioDevices = "AudioDevices"
 }
 
 enum AppDiagnostics {
@@ -38,6 +43,10 @@ enum AppDiagnostics {
     private static let transcriptionEngineLogger = Logger(subsystem: subsystem, category: DiagnosticCategory.transcriptionEngine.rawValue)
     private static let audioRecorderLogger = Logger(subsystem: subsystem, category: DiagnosticCategory.audioRecorder.rawValue)
     private static let httpServerLogger = Logger(subsystem: subsystem, category: DiagnosticCategory.httpServer.rawValue)
+    private static let pasteboardLogger = Logger(subsystem: subsystem, category: DiagnosticCategory.pasteboard.rawValue)
+    private static let hotkeyLogger = Logger(subsystem: subsystem, category: DiagnosticCategory.hotkey.rawValue)
+    private static let databaseLogger = Logger(subsystem: subsystem, category: DiagnosticCategory.database.rawValue)
+    private static let audioDevicesLogger = Logger(subsystem: subsystem, category: DiagnosticCategory.audioDevices.rawValue)
     static let launchSessionID = String(UUID().uuidString.prefix(8)).lowercased()
     static let logFileURL = prepareLogFile()
 
@@ -73,6 +82,40 @@ enum AppDiagnostics {
             "executablePath=\(executablePath)",
             "diagnosticsFile=\(logFilePath)"
         ].joined(separator: " ")
+    }
+
+    static func compactText(_ text: String, limit: Int = 500) -> String {
+        let sanitized = text.replacingOccurrences(of: "\n", with: "\\n")
+        guard sanitized.count > limit else { return sanitized }
+        let prefix = sanitized.prefix(limit)
+        return "\(prefix)…<truncated totalChars=\(sanitized.count)>"
+    }
+
+    static func quoted(_ text: String, limit: Int = 500) -> String {
+        "\"\(compactText(text, limit: limit))\""
+    }
+
+    static func optionalQuoted(_ text: String?, limit: Int = 500) -> String {
+        guard let text else { return "nil" }
+        return quoted(text, limit: limit)
+    }
+
+    static func boolLabel(_ value: Bool) -> String {
+        value ? "yes" : "no"
+    }
+
+    static func threadSummary() -> String {
+        "thread=\(Thread.isMainThread ? "main" : "background")"
+    }
+
+    static func frontmostAppSummary() -> String {
+        guard let app = NSWorkspace.shared.frontmostApplication else {
+            return "frontmostApp=none"
+        }
+
+        let bundleID = app.bundleIdentifier ?? "unknown"
+        let name = app.localizedName ?? "unknown"
+        return "frontmostApp={name=\(name) bundleID=\(bundleID) pid=\(app.processIdentifier)}"
     }
 
     static func debug(_ category: DiagnosticCategory, _ message: String) {
@@ -121,6 +164,14 @@ enum AppDiagnostics {
             return audioRecorderLogger
         case .httpServer:
             return httpServerLogger
+        case .pasteboard:
+            return pasteboardLogger
+        case .hotkey:
+            return hotkeyLogger
+        case .database:
+            return databaseLogger
+        case .audioDevices:
+            return audioDevicesLogger
         }
     }
 

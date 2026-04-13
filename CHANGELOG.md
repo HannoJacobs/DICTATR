@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.26
+- Added aggressive end-to-end diagnostics across DICTATR so future random failures leave a much more complete forensic trail in `latest.log`.
+- App state changes now log old and new values together with a full runtime snapshot, including model state, retry state, frontmost app, and the active audio route.
+- Audio diagnostics now explicitly record built-in-versus-Bluetooth microphone selection, default input/output transport state, full device inventories, and richer recorder/config-change/reset context.
+- Transcription diagnostics now log source file metadata, decode options, per-segment text, raw generated text, and normalized output text before paste/history handling.
+- Pasteboard, hotkey, HTTP server, and database operations now emit verbose request/response and state logs so failures can be correlated across the whole dictation pipeline.
+
 ## 1.23
 - Replaced the old hand-built DMG wrapper with an archive-based release path that packages the real macOS app bundle instead of reconstructing `Contents/` around a raw binary.
 - Added centralized release signing config in `release.env`, fail-fast signing checks, designated-requirement validation, and configurable `spctl` verification so DICTATR ships with a stable code identity instead of a per-build `cdhash`.

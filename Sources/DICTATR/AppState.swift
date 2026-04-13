@@ -29,6 +29,7 @@
 //   Every code path deletes the WAV file — success, failure, cancellation, too-short.
 //   If the app crashes mid-transcription, the OS clears temp dir eventually.
 
+import AVFoundation
 import AppKit
 import Foundation
 import KeyboardShortcuts
@@ -46,10 +47,38 @@ enum DictationState: Equatable {
 final class AppState {
     private static let logger = Logger(subsystem: "com.dictatr", category: "AppState")
 
-    var currentState: DictationState = .idle
-    var lastTranscription: String?
-    var statusMessage: String = "Ready"
-    var errorMessage: String?
+    var currentState: DictationState = .idle {
+        didSet {
+            logObservableChange(
+                name: "currentState",
+                oldValue: String(describing: oldValue),
+                newValue: String(describing: currentState)
+            )
+        }
+    }
+    var lastTranscription: String? {
+        didSet {
+            logObservableChange(
+                name: "lastTranscription",
+                oldValue: oldValue.map { "chars=\($0.count) text=\(AppDiagnostics.quoted($0, limit: 800))" } ?? "nil",
+                newValue: lastTranscription.map { "chars=\($0.count) text=\(AppDiagnostics.quoted($0, limit: 800))" } ?? "nil"
+            )
+        }
+    }
+    var statusMessage: String = "Ready" {
+        didSet {
+            logObservableChange(name: "statusMessage", oldValue: AppDiagnostics.quoted(oldValue), newValue: AppDiagnostics.quoted(statusMessage))
+        }
+    }
+    var errorMessage: String? {
+        didSet {
+            logObservableChange(
+                name: "errorMessage",
+                oldValue: AppDiagnostics.optionalQuoted(oldValue),
+                newValue: AppDiagnostics.optionalQuoted(errorMessage)
+            )
+        }
+    }
 
     // Stored properties with didSet so @Observable tracks changes correctly.
     // Computed properties are NOT instrumented by @Observable, so using them
@@ -62,7 +91,14 @@ final class AppState {
         }
         return UserDefaults.standard.bool(forKey: "autoPasteEnabled")
     }() {
-        didSet { UserDefaults.standard.set(autoPasteEnabled, forKey: "autoPasteEnabled") }
+        didSet {
+            UserDefaults.standard.set(autoPasteEnabled, forKey: "autoPasteEnabled")
+            logObservableChange(
+                name: "autoPasteEnabled",
+                oldValue: String(oldValue),
+                newValue: String(autoPasteEnabled)
+            )
+        }
     }
 
     var retentionCount: Int = {
@@ -72,11 +108,23 @@ final class AppState {
         didSet {
             retentionCount = max(1, retentionCount)
             UserDefaults.standard.set(retentionCount, forKey: "retentionCount")
+            logObservableChange(
+                name: "retentionCount",
+                oldValue: String(oldValue),
+                newValue: String(retentionCount)
+            )
         }
     }
 
     var hasCompletedOnboarding: Bool = UserDefaults.standard.bool(forKey: "hasCompletedOnboarding") {
-        didSet { UserDefaults.standard.set(hasCompletedOnboarding, forKey: "hasCompletedOnboarding") }
+        didSet {
+            UserDefaults.standard.set(hasCompletedOnboarding, forKey: "hasCompletedOnboarding")
+            logObservableChange(
+                name: "hasCompletedOnboarding",
+                oldValue: String(oldValue),
+                newValue: String(hasCompletedOnboarding)
+            )
+        }
     }
 
     let audioRecorder = AudioRecorder()
@@ -111,6 +159,32 @@ final class AppState {
     var configuredModelPolicySummary: String { transcriptionEngine.configuredModelPolicySummary }
     var canHardResetAudio: Bool { currentState != .transcribing }
 
+    private func logObservableChange(name: String, oldValue: String, newValue: String) {
+        guard oldValue != newValue else { return }
+        AppDiagnostics.info(
+            .appState,
+            "state change field=\(name) old=\(oldValue) new=\(newValue) snapshot={\(stateSnapshot())}"
+        )
+    }
+
+    private func stateSnapshot() -> String {
+        [
+            "currentState=\(String(describing: currentState))",
+            "statusMessage=\(AppDiagnostics.quoted(statusMessage, limit: 200))",
+            "errorMessage=\(AppDiagnostics.optionalQuoted(errorMessage, limit: 200))",
+            "lastTranscriptionChars=\(lastTranscription?.count ?? 0)",
+            "isModelLoaded=\(AppDiagnostics.boolLabel(transcriptionEngine.isModelLoaded))",
+            "isModelLoading=\(AppDiagnostics.boolLabel(transcriptionEngine.isLoading))",
+            "autoPasteEnabled=\(AppDiagnostics.boolLabel(autoPasteEnabled))",
+            "retentionCount=\(retentionCount)",
+            "retryCount=\(autoRetryCount)",
+            "recoveryPending=\(AppDiagnostics.boolLabel(recordingRecoveryPending))",
+            AppDiagnostics.threadSummary(),
+            AppDiagnostics.frontmostAppSummary(),
+            AudioDeviceDiagnostics.currentRouteSnapshot()
+        ].joined(separator: " ")
+    }
+
     init() {
         // Register defaults (idempotent, never overwrites explicit user choices)
         UserDefaults.standard.register(defaults: ["autoPasteEnabled": true])
@@ -133,7 +207,11 @@ final class AppState {
 
         AppDiagnostics.info(
             .appState,
-            "AppState initialized \(AppDiagnostics.runtimeSummary) autoPasteEnabled=\(autoPasteEnabled) retentionCount=\(retentionCount) onboardingComplete=\(hasCompletedOnboarding) databaseAvailable=\(databaseManager != nil) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
+            "AppState initialized \(AppDiagnostics.runtimeSummary) autoPasteEnabled=\(autoPasteEnabled) retentionCount=\(retentionCount) onboardingComplete=\(hasCompletedOnboarding) databaseAvailable=\(databaseManager != nil) snapshot={\(stateSnapshot())} devices=\(AudioDeviceDiagnostics.availableDevicesSnapshot())"
+        )
+        AppDiagnostics.info(
+            .audioDevices,
+            "AppState audio snapshot route=\(AudioDeviceDiagnostics.currentRouteSnapshot()) devices=\(AudioDeviceDiagnostics.availableDevicesSnapshot())"
         )
 
         // Wire up auto-stop callback from AudioRecorder (watchdog timeout, engine failure)
@@ -268,7 +346,7 @@ final class AppState {
     func toggleRecording() {
         AppDiagnostics.info(
             .appState,
-            "toggleRecording currentState=\(String(describing: currentState)) retryCount=\(autoRetryCount) recoveryPending=\(recordingRecoveryPending)"
+            "toggleRecording currentState=\(String(describing: currentState)) retryCount=\(autoRetryCount) recoveryPending=\(recordingRecoveryPending) snapshot={\(stateSnapshot())}"
         )
         switch currentState {
         case .idle:
@@ -309,7 +387,7 @@ final class AppState {
 
         AppDiagnostics.info(
             .appState,
-            "startRecording requested retryCount=\(autoRetryCount) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
+            "startRecording requested retryCount=\(autoRetryCount) snapshot={\(stateSnapshot())} devices=\(AudioDeviceDiagnostics.availableDevicesSnapshot())"
         )
         do {
             let url = try audioRecorder.startRecording()
@@ -320,7 +398,7 @@ final class AppState {
             recordingIndicator.show(audioRecorder: audioRecorder)
             AppDiagnostics.info(
                 .appState,
-                "recording started session=\(audioRecorder.recordingSessionID ?? "none") file=\(url.lastPathComponent) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
+                "recording started session=\(audioRecorder.recordingSessionID ?? "none") file=\(url.lastPathComponent) snapshot={\(stateSnapshot())}"
             )
         } catch {
             currentState = .idle
@@ -328,7 +406,7 @@ final class AppState {
             errorMessage = "Failed to start recording: \(error.localizedDescription)"
             AppDiagnostics.error(
                 .appState,
-                "recording failed to start error=\(error.localizedDescription) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
+                "recording failed to start error=\(error.localizedDescription) snapshot={\(stateSnapshot())} devices=\(AudioDeviceDiagnostics.availableDevicesSnapshot())"
             )
         }
     }
@@ -348,14 +426,14 @@ final class AppState {
 
         AppDiagnostics.error(
             .appState,
-            "Recording auto-stopped session=\(audioRecorder.recordingSessionID ?? "none") message=\(message) retryCountBeforeIncrement=\(autoRetryCount) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
+            "Recording auto-stopped session=\(audioRecorder.recordingSessionID ?? "none") message=\(AppDiagnostics.quoted(message, limit: 400)) retryCountBeforeIncrement=\(autoRetryCount) snapshot={\(stateSnapshot())} devices=\(AudioDeviceDiagnostics.availableDevicesSnapshot())"
         )
         autoRetryCount += 1
 
         if autoRetryCount > 3 {
             AppDiagnostics.error(
                 .appState,
-                "Exceeded max retries retryCount=\(self.autoRetryCount) route=\(AudioDeviceDiagnostics.currentRouteSnapshot()) availableDevices=\(AudioDeviceDiagnostics.availableDevicesSnapshot())"
+                "Exceeded max retries retryCount=\(self.autoRetryCount) snapshot={\(stateSnapshot())} availableDevices=\(AudioDeviceDiagnostics.availableDevicesSnapshot())"
             )
             recordingRecoveryPending = false
             autoRetryTask?.cancel()
@@ -370,7 +448,7 @@ final class AppState {
 
         AppDiagnostics.warning(
             .appState,
-            "Scheduling retry on current route delay=\(String(format: "%.1f", delaySeconds))s retryCount=\(autoRetryCount) message=\(message) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
+            "Scheduling retry on current route delay=\(String(format: "%.1f", delaySeconds))s retryCount=\(autoRetryCount) message=\(AppDiagnostics.quoted(message, limit: 400)) snapshot={\(stateSnapshot())}"
         )
         currentState = .idle
         statusMessage = "Reconnecting..."
@@ -408,7 +486,7 @@ final class AppState {
         guard transcriptionEngine.isModelLoaded else { return }
         AppDiagnostics.info(
             .appState,
-            "retryStartRecording retryCount=\(autoRetryCount) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
+            "retryStartRecording retryCount=\(autoRetryCount) snapshot={\(stateSnapshot())} devices=\(AudioDeviceDiagnostics.availableDevicesSnapshot())"
         )
 
         do {
@@ -419,12 +497,12 @@ final class AppState {
             recordingIndicator.show(audioRecorder: audioRecorder)
             AppDiagnostics.info(
                 .appState,
-                "retry succeeded session=\(audioRecorder.recordingSessionID ?? "none") file=\(url.lastPathComponent) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
+                "retry succeeded session=\(audioRecorder.recordingSessionID ?? "none") file=\(url.lastPathComponent) snapshot={\(stateSnapshot())}"
             )
         } catch {
             AppDiagnostics.error(
                 .appState,
-                "retry failed error=\(error.localizedDescription) retryCount=\(autoRetryCount) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
+                "retry failed error=\(error.localizedDescription) retryCount=\(autoRetryCount) snapshot={\(stateSnapshot())} devices=\(AudioDeviceDiagnostics.availableDevicesSnapshot())"
             )
             handleRecordingFailure(message: error.localizedDescription)
         }
@@ -441,7 +519,7 @@ final class AppState {
         let sessionID = audioRecorder.recordingSessionID ?? "none"
         AppDiagnostics.info(
             .appState,
-            "stopRecordingAndTranscribe requested session=\(sessionID) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
+            "stopRecordingAndTranscribe requested session=\(sessionID) snapshot={\(stateSnapshot())}"
         )
         NSSound(named: .init("Pop"))?.play()
         guard let result = audioRecorder.stopRecording() else {
@@ -459,8 +537,20 @@ final class AppState {
 
         AppDiagnostics.info(
             .appState,
-            "recording stopped session=\(sessionID) duration=\(String(format: "%.3f", result.duration))s frames=\(result.framesWritten) file=\(result.url.lastPathComponent)"
+            "recording stopped session=\(sessionID) duration=\(String(format: "%.3f", result.duration))s frames=\(result.framesWritten) file=\(result.url.lastPathComponent) snapshot={\(stateSnapshot())}"
         )
+
+        if let signalStats = Self.analyzeAudioSignal(at: result.url) {
+            AppDiagnostics.info(
+                .appState,
+                "recording signal session=\(sessionID) rms=\(String(format: "%.6f", signalStats.rms)) peak=\(String(format: "%.6f", signalStats.peak)) samples=\(signalStats.sampleCount)"
+            )
+        } else {
+            AppDiagnostics.warning(
+                .appState,
+                "recording signal analysis unavailable session=\(sessionID) file=\(result.url.lastPathComponent)"
+            )
+        }
 
         // Skip transcription for empty or trivially short recordings
         let fileSize = (try? FileManager.default.attributesOfItem(atPath: result.url.path)[.size] as? Int) ?? 0
@@ -505,7 +595,7 @@ final class AppState {
                 let text = try await self.transcriptionEngine.transcribe(audioURL: result.url)
                 AppDiagnostics.info(
                     .appState,
-                    "transcription returned session=\(sessionID) chars=\(text.count) file=\(result.url.lastPathComponent)"
+                    "transcription returned session=\(sessionID) chars=\(text.count) text=\(AppDiagnostics.quoted(text, limit: 1200)) file=\(result.url.lastPathComponent) snapshot={\(self.stateSnapshot())}"
                 )
 
                 guard !Task.isCancelled else {
@@ -522,12 +612,18 @@ final class AppState {
                     return
                 }
 
-                AppDiagnostics.info(.appState, "transcription complete session=\(sessionID) chars=\(text.count)")
+                AppDiagnostics.info(
+                    .appState,
+                    "transcription complete session=\(sessionID) chars=\(text.count) text=\(AppDiagnostics.quoted(text, limit: 1200)) snapshot={\(self.stateSnapshot())}"
+                )
                 self.lastTranscription = text
 
                 // Paste to active app
                 let pasteResult = await PasteManager.paste(text: text, autoPaste: self.autoPasteEnabled)
-                AppDiagnostics.info(.appState, "paste result session=\(sessionID) result=\(String(describing: pasteResult))")
+                AppDiagnostics.info(
+                    .appState,
+                    "paste result session=\(sessionID) result=\(String(describing: pasteResult)) snapshot={\(self.stateSnapshot())}"
+                )
 
                 if pasteResult == .noAccessibility {
                     self.errorMessage = "Settings → search \"Privacy\" → Accessibility → toggle DICTATR on"
@@ -546,7 +642,10 @@ final class AppState {
                         try db.deleteOld(keepLast: self.retentionCount)
                     } catch {
                         self.errorMessage = "Failed to save to history: \(error.localizedDescription)"
-                        AppDiagnostics.error(.appState, "failed to save history session=\(sessionID) error=\(error.localizedDescription)")
+                        AppDiagnostics.error(
+                            .appState,
+                            "failed to save history session=\(sessionID) error=\(error.localizedDescription) snapshot={\(self.stateSnapshot())}"
+                        )
                     }
                 }
 
@@ -565,7 +664,10 @@ final class AppState {
                 // Clean up temp audio file on failure
                 try? FileManager.default.removeItem(at: result.url)
                 guard let self else { return }
-                AppDiagnostics.error(.appState, "transcription failed session=\(sessionID) error=\(error.localizedDescription)")
+                AppDiagnostics.error(
+                    .appState,
+                    "transcription failed session=\(sessionID) error=\(error.localizedDescription) snapshot={\(self.stateSnapshot())}"
+                )
                 self.recordingIndicator.hide()
                 self.errorMessage = "Transcription failed: \(error.localizedDescription)"
                 self.statusMessage = "Error"
@@ -575,6 +677,10 @@ final class AppState {
     }
 
     func copyToClipboard(_ text: String) {
+        AppDiagnostics.info(
+            .appState,
+            "copyToClipboard chars=\(text.count) text=\(AppDiagnostics.quoted(text, limit: 1000)) \(AppDiagnostics.frontmostAppSummary())"
+        )
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
@@ -584,5 +690,39 @@ final class AppState {
 extension UserDefaults {
     func contains(key: String) -> Bool {
         object(forKey: key) != nil
+    }
+}
+
+private extension AppState {
+    static func analyzeAudioSignal(at url: URL) -> (rms: Float, peak: Float, sampleCount: Int)? {
+        guard let file = try? AVAudioFile(forReading: url) else { return nil }
+        let frameCount = AVAudioFrameCount(file.length)
+        guard frameCount > 0,
+              let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: frameCount) else {
+            return nil
+        }
+
+        do {
+            try file.read(into: buffer)
+        } catch {
+            return nil
+        }
+
+        guard let channelData = buffer.floatChannelData else { return nil }
+        let samples = Int(buffer.frameLength)
+        guard samples > 0 else { return nil }
+
+        let channel = channelData[0]
+        var sumSquares: Float = 0
+        var peak: Float = 0
+
+        for index in 0..<samples {
+            let value = channel[index]
+            sumSquares += value * value
+            peak = max(peak, abs(value))
+        }
+
+        let rms = sqrt(sumSquares / Float(samples))
+        return (rms, peak, samples)
     }
 }

@@ -72,14 +72,16 @@ final class LocalHTTPServer: @unchecked Sendable {
     // MARK: - Connection handling
 
     private func handleConnection(_ connection: NWConnection) {
+        let requestID = String(UUID().uuidString.prefix(8)).lowercased()
+        AppDiagnostics.info(.httpServer, "connection accepted requestID=\(requestID)")
         connection.start(queue: .global(qos: .utility))
-        receiveAllData(connection: connection, buffer: Data())
+        receiveAllData(connection: connection, buffer: Data(), requestID: requestID)
     }
 
     /// Accumulate data from the connection until we have a complete HTTP request.
     /// NWConnection.receive may deliver data in chunks, so we keep reading until
     /// we have the full body (determined by Content-Length) or the connection closes.
-    private func receiveAllData(connection: NWConnection, buffer: Data) {
+    private func receiveAllData(connection: NWConnection, buffer: Data, requestID: String) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 1_048_576) { [weak self] data, _, isComplete, error in
             guard let self else {
                 connection.cancel()
@@ -96,11 +98,15 @@ final class LocalHTTPServer: @unchecked Sendable {
             guard let separatorRange = accumulated.range(of: headerSeparator) else {
                 if isComplete || error != nil {
                     // Connection closed before we got complete headers
+                    AppDiagnostics.warning(
+                        .httpServer,
+                        "request incomplete requestID=\(requestID) bytes=\(accumulated.count) isComplete=\(AppDiagnostics.boolLabel(isComplete)) error=\(error?.localizedDescription ?? "none")"
+                    )
                     Self.sendResponse(connection: connection, status: 400, body: "Bad Request: incomplete headers")
                     return
                 }
                 // Keep reading
-                self.receiveAllData(connection: connection, buffer: accumulated)
+                self.receiveAllData(connection: connection, buffer: accumulated, requestID: requestID)
                 return
             }
 
@@ -108,32 +114,38 @@ final class LocalHTTPServer: @unchecked Sendable {
             let headerString = String(data: headerData, encoding: .utf8) ?? ""
             let bodyStartIndex = separatorRange.upperBound
             let currentBody = accumulated[bodyStartIndex...]
+            let requestLine = headerString.components(separatedBy: "\r\n").first ?? "unknown"
+            let contentLength = self.parseContentLength(from: headerString)
+
+            AppDiagnostics.info(
+                .httpServer,
+                "request parsed requestID=\(requestID) line=\(AppDiagnostics.quoted(requestLine, limit: 300)) header=\(AppDiagnostics.quoted(headerString, limit: 1200)) bufferedBodyBytes=\(currentBody.count) declaredContentLength=\(contentLength)"
+            )
 
             // For GET requests (like /ping), no body needed
             if headerString.hasPrefix("GET ") {
-                self.routeRequest(connection: connection, header: headerString, body: Data())
+                self.routeRequest(connection: connection, header: headerString, body: Data(), requestID: requestID)
                 return
             }
 
             // For POST, check Content-Length to know when we have the full body
-            let contentLength = self.parseContentLength(from: headerString)
             if contentLength > 0, currentBody.count < contentLength {
                 if isComplete || error != nil {
                     // Connection closed before full body received — process what we have
                     AppDiagnostics.warning(
                         .httpServer,
-                        "Connection closed early bodyBytes=\(currentBody.count)/\(contentLength)"
+                        "Connection closed early requestID=\(requestID) bodyBytes=\(currentBody.count)/\(contentLength) error=\(error?.localizedDescription ?? "none")"
                     )
-                    self.routeRequest(connection: connection, header: headerString, body: Data(currentBody))
+                    self.routeRequest(connection: connection, header: headerString, body: Data(currentBody), requestID: requestID)
                     return
                 }
                 // Keep reading
-                self.receiveAllData(connection: connection, buffer: accumulated)
+                self.receiveAllData(connection: connection, buffer: accumulated, requestID: requestID)
                 return
             }
 
             // We have enough data
-            self.routeRequest(connection: connection, header: headerString, body: Data(currentBody))
+            self.routeRequest(connection: connection, header: headerString, body: Data(currentBody), requestID: requestID)
         }
     }
 
@@ -150,14 +162,18 @@ final class LocalHTTPServer: @unchecked Sendable {
 
     // MARK: - Routing
 
-    private func routeRequest(connection: NWConnection, header: String, body: Data) {
+    private func routeRequest(connection: NWConnection, header: String, body: Data, requestID: String) {
+        AppDiagnostics.info(
+            .httpServer,
+            "routing request requestID=\(requestID) bodyBytes=\(body.count) route=\(AppDiagnostics.quoted(header.components(separatedBy: "\r\n").first ?? "unknown", limit: 300))"
+        )
         if header.hasPrefix("GET /ping") {
             Self.sendResponse(connection: connection, status: 200, body: "pong")
             return
         }
 
         if header.hasPrefix("POST /transcribe") {
-            handleTranscribe(connection: connection, header: header, body: body)
+            handleTranscribe(connection: connection, header: header, body: body, requestID: requestID)
             return
         }
 
@@ -166,8 +182,9 @@ final class LocalHTTPServer: @unchecked Sendable {
 
     // MARK: - Transcription endpoint
 
-    private func handleTranscribe(connection: NWConnection, header: String, body: Data) {
+    private func handleTranscribe(connection: NWConnection, header: String, body: Data, requestID: String) {
         guard !body.isEmpty else {
+            AppDiagnostics.warning(.httpServer, "transcribe request rejected requestID=\(requestID) reason=empty-body")
             Self.sendResponse(connection: connection, status: 400, body: "Empty request body")
             return
         }
@@ -186,12 +203,15 @@ final class LocalHTTPServer: @unchecked Sendable {
         do {
             try body.write(to: tempURL)
         } catch {
-            AppDiagnostics.error(.httpServer, "Failed to write temp file error=\(error.localizedDescription)")
+            AppDiagnostics.error(.httpServer, "Failed to write temp file requestID=\(requestID) path=\(tempURL.path) error=\(error.localizedDescription)")
             Self.sendResponse(connection: connection, status: 500, body: "Failed to write temp file")
             return
         }
 
-        AppDiagnostics.info(.httpServer, "Received transcription request bytes=\(body.count) ext=\(ext)")
+        AppDiagnostics.info(
+            .httpServer,
+            "Received transcription request requestID=\(requestID) bytes=\(body.count) ext=\(ext) tempPath=\(tempURL.path) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
+        )
 
         let transcribe = self.transcribe
         Task {
@@ -199,9 +219,12 @@ final class LocalHTTPServer: @unchecked Sendable {
             do {
                 let text = try await transcribe(tempURL)
                 Self.sendResponse(connection: connection, status: 200, body: text)
-                AppDiagnostics.info(.httpServer, "Transcription served chars=\(text.count)")
+                AppDiagnostics.info(
+                    .httpServer,
+                    "Transcription served requestID=\(requestID) chars=\(text.count) text=\(AppDiagnostics.quoted(text, limit: 1200))"
+                )
             } catch {
-                AppDiagnostics.error(.httpServer, "Transcription failed error=\(error.localizedDescription)")
+                AppDiagnostics.error(.httpServer, "Transcription failed requestID=\(requestID) error=\(error.localizedDescription)")
                 Self.sendResponse(connection: connection, status: 500, body: "Transcription failed: \(error.localizedDescription)")
             }
         }
