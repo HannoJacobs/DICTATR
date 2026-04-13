@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.22
+- Removed the built-in-mic fallback path so DICTATR now stays on the active system route instead of switching away from Bluetooth input during recovery.
+- Changed recording retries to reconnect on the current route, which keeps Bluetooth microphone and Bluetooth headphone output paired through HFP renegotiation instead of forcing a mixed-device route.
+- Documented the post-`1.21` AirPods follow-up investigation in [`docs/bluetooth_audio_followup_handoff_2026-04-10.md`](/Users/hannojacobs/Documents/Code/DICTATR/docs/bluetooth_audio_followup_handoff_2026-04-10.md), including the shipped change, the failed AirPods retest, and the diagnosis that led to the `1.22` route-policy fix.
+
 ## 1.21
 - Added a `Hard Reset Audio` menu action that force-resets DICTATR's own recorder state and terminates the owning Chromium/Electron app process when one of its audio utility helpers is contending for the microphone route.
 - Hard audio reset outcomes are now logged explicitly, including killed owner-process PIDs, skipped processes, and process-enumeration failures, so future Bluetooth or route-churn incidents leave a concrete audit trail.

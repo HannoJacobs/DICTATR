@@ -221,7 +221,7 @@ final class AppState {
 
         AppDiagnostics.warning(
             .appState,
-            "hardResetAudioContention requested currentState=\(String(describing: currentState)) retryCount=\(autoRetryCount) recoveryPending=\(recordingRecoveryPending) useBuiltInMic=\(audioRecorder.useBuiltInMic) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
+            "hardResetAudioContention requested currentState=\(String(describing: currentState)) retryCount=\(autoRetryCount) recoveryPending=\(recordingRecoveryPending) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
         )
 
         autoRetryTask?.cancel()
@@ -229,7 +229,6 @@ final class AppState {
         recordingRecoveryPending = false
         autoRetryCount = 0
         audioRecorder.forceReset(reason: "user requested hard audio reset")
-        audioRecorder.useBuiltInMic = false
         recordingIndicator.hide()
         currentState = .idle
 
@@ -269,23 +268,22 @@ final class AppState {
     func toggleRecording() {
         AppDiagnostics.info(
             .appState,
-            "toggleRecording currentState=\(String(describing: currentState)) retryCount=\(autoRetryCount) recoveryPending=\(recordingRecoveryPending) useBuiltInMic=\(audioRecorder.useBuiltInMic)"
+            "toggleRecording currentState=\(String(describing: currentState)) retryCount=\(autoRetryCount) recoveryPending=\(recordingRecoveryPending)"
         )
         switch currentState {
         case .idle:
             if recordingRecoveryPending {
-                statusMessage = audioRecorder.useBuiltInMic ? "Using MacBook mic..." : "Reconnecting..."
+                statusMessage = "Reconnecting..."
                 errorMessage = "Microphone recovery is already in progress. Please wait."
                 AppDiagnostics.warning(
                     .appState,
-                    "toggleRecording ignored because microphone recovery is already pending retryCount=\(autoRetryCount) useBuiltInMic=\(audioRecorder.useBuiltInMic) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
+                    "toggleRecording ignored because microphone recovery is already pending retryCount=\(autoRetryCount) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
                 )
                 return
             }
             autoRetryCount = 0
             recordingRecoveryPending = false
             autoRetryTask?.cancel()
-            configurePreferredInputForNewRecording()
             startRecording()
         case .recording:
             stopRecordingAndTranscribe()
@@ -309,10 +307,9 @@ final class AppState {
             return
         }
 
-        configurePreferredInputForNewRecording()
         AppDiagnostics.info(
             .appState,
-            "startRecording requested retryCount=\(autoRetryCount) useBuiltInMic=\(audioRecorder.useBuiltInMic) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
+            "startRecording requested retryCount=\(autoRetryCount) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
         )
         do {
             let url = try audioRecorder.startRecording()
@@ -331,14 +328,12 @@ final class AppState {
             errorMessage = "Failed to start recording: \(error.localizedDescription)"
             AppDiagnostics.error(
                 .appState,
-                "recording failed to start error=\(error.localizedDescription) useBuiltInMic=\(audioRecorder.useBuiltInMic) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
+                "recording failed to start error=\(error.localizedDescription) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
             )
         }
     }
 
-    // Recovery strategy: try default device once more after a short delay, then fall back
-    // to built-in mic. Only changes the input — audio output stays on headphones.
-    //
+    // Recovery strategy: stay on the active system route and retry after a short delay.
     // Max 3 failure *events* (after coalescing). A reboot "fixes" Bluetooth/HFP because
     // Core Audio clears stuck state; we approximate that with longer settle delays after
     // route-churn messages, not by rebooting the Mac (apps can't).
@@ -353,7 +348,7 @@ final class AppState {
 
         AppDiagnostics.error(
             .appState,
-            "Recording auto-stopped session=\(audioRecorder.recordingSessionID ?? "none") message=\(message) retryCountBeforeIncrement=\(autoRetryCount) useBuiltInMic=\(audioRecorder.useBuiltInMic) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
+            "Recording auto-stopped session=\(audioRecorder.recordingSessionID ?? "none") message=\(message) retryCountBeforeIncrement=\(autoRetryCount) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
         )
         autoRetryCount += 1
 
@@ -373,51 +368,26 @@ final class AppState {
 
         let delaySeconds = Self.delayBeforeReconnectAttempt(message: message, attempt: autoRetryCount)
 
-        if autoRetryCount == 1 {
-            AppDiagnostics.warning(
-                .appState,
-                "Scheduling retry with default device delay=\(String(format: "%.1f", delaySeconds))s retryCount=\(autoRetryCount) message=\(message) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
-            )
-            currentState = .idle
-            statusMessage = "Reconnecting..."
-            recordingIndicator.showReconnecting()
+        AppDiagnostics.warning(
+            .appState,
+            "Scheduling retry on current route delay=\(String(format: "%.1f", delaySeconds))s retryCount=\(autoRetryCount) message=\(message) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
+        )
+        currentState = .idle
+        statusMessage = "Reconnecting..."
+        recordingIndicator.showReconnecting()
 
-            recordingRecoveryPending = true
-            autoRetryTask?.cancel()
-            autoRetryTask = Task { [weak self] in
-                try? await Task.sleep(for: .seconds(delaySeconds))
-                guard let self else { return }
-                guard !Task.isCancelled, self.currentState == .idle else {
-                    self.recordingRecoveryPending = false
-                    AppDiagnostics.info(.appState, "Default-device retry cancelled before execution")
-                    return
-                }
+        recordingRecoveryPending = true
+        autoRetryTask?.cancel()
+        autoRetryTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(delaySeconds))
+            guard let self else { return }
+            guard !Task.isCancelled, self.currentState == .idle else {
                 self.recordingRecoveryPending = false
-                self.retryStartRecording()
+                AppDiagnostics.info(.appState, "Route retry cancelled before execution")
+                return
             }
-        } else {
-            AppDiagnostics.warning(
-                .appState,
-                "Falling back to built-in mic retryCount=\(self.autoRetryCount) delay=\(String(format: "%.1f", delaySeconds))s message=\(message) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
-            )
-            audioRecorder.useBuiltInMic = true
-            currentState = .idle
-            statusMessage = "Using MacBook mic..."
-            recordingIndicator.showReconnecting()
-
-            recordingRecoveryPending = true
-            autoRetryTask?.cancel()
-            autoRetryTask = Task { [weak self] in
-                try? await Task.sleep(for: .seconds(delaySeconds))
-                guard let self else { return }
-                guard !Task.isCancelled, self.currentState == .idle else {
-                    self.recordingRecoveryPending = false
-                    AppDiagnostics.info(.appState, "Built-in mic retry cancelled before execution")
-                    return
-                }
-                self.recordingRecoveryPending = false
-                self.retryStartRecording()
-            }
+            self.recordingRecoveryPending = false
+            self.retryStartRecording()
         }
     }
 
@@ -431,72 +401,32 @@ final class AppState {
         if attempt == 1 {
             return routeChurn ? 2.5 : 1.0
         }
-        // Built-in fallback attempts: give Core Audio a moment after Bluetooth chaos.
         return routeChurn ? 2.0 : 1.5
     }
 
     private func retryStartRecording() {
         guard transcriptionEngine.isModelLoaded else { return }
-        configurePreferredInputForRetry()
         AppDiagnostics.info(
             .appState,
-            "retryStartRecording retryCount=\(autoRetryCount) useBuiltInMic=\(audioRecorder.useBuiltInMic) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
+            "retryStartRecording retryCount=\(autoRetryCount) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
         )
 
         do {
             let url = try audioRecorder.startRecording()
             currentState = .recording
-            statusMessage = audioRecorder.useBuiltInMic ? "Recording (MacBook mic)..." : "Recording..."
+            statusMessage = "Recording..."
             errorMessage = nil
             recordingIndicator.show(audioRecorder: audioRecorder)
             AppDiagnostics.info(
                 .appState,
-                "retry succeeded session=\(audioRecorder.recordingSessionID ?? "none") file=\(url.lastPathComponent) builtInMic=\(self.audioRecorder.useBuiltInMic) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
+                "retry succeeded session=\(audioRecorder.recordingSessionID ?? "none") file=\(url.lastPathComponent) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
             )
         } catch {
             AppDiagnostics.error(
                 .appState,
-                "retry failed error=\(error.localizedDescription) retryCount=\(autoRetryCount) builtInMic=\(audioRecorder.useBuiltInMic) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
+                "retry failed error=\(error.localizedDescription) retryCount=\(autoRetryCount) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
             )
-            if !audioRecorder.useBuiltInMic {
-                // First retry with default device failed to even start — go straight to built-in
-                handleRecordingFailure(message: error.localizedDescription)
-            } else {
-                // Even built-in mic failed — give up
-                currentState = .idle
-                statusMessage = "Recording failed"
-                errorMessage = "Could not access any microphone."
-                recordingIndicator.hide()
-            }
-        }
-    }
-
-    private func configurePreferredInputForNewRecording() {
-        if AudioDeviceDiagnostics.defaultInputIsBluetooth(), AudioDeviceDiagnostics.findBuiltInMicDevice() != nil {
-            if !audioRecorder.useBuiltInMic {
-                AppDiagnostics.warning(
-                    .appState,
-                    "Bluetooth default input detected — preferring MacBook mic for new recording route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
-                )
-            }
-            audioRecorder.useBuiltInMic = true
-            return
-        }
-
-        audioRecorder.useBuiltInMic = false
-    }
-
-    private func configurePreferredInputForRetry() {
-        if audioRecorder.useBuiltInMic {
-            return
-        }
-
-        if AudioDeviceDiagnostics.defaultInputIsBluetooth(), AudioDeviceDiagnostics.findBuiltInMicDevice() != nil {
-            AppDiagnostics.warning(
-                .appState,
-                "Bluetooth default input still active during retry — forcing MacBook mic route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
-            )
-            audioRecorder.useBuiltInMic = true
+            handleRecordingFailure(message: error.localizedDescription)
         }
     }
 

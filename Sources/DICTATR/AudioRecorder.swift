@@ -27,10 +27,10 @@
 //   1. Engine gets killed by CoreAudio during HFP negotiate (~168ms after start).
 //      This is unavoidable. AppState's retry handles it.
 //
-//   2. On retry (especially built-in mic fallback), the engine may survive but the
-//      Bluetooth route keeps renegotiating underneath it. Reinstalling the tap in
-//      that intermediate state can trip AVAudioEngine format assertions. Fix: reset
-//      the recorder and let AppState restart with a fresh engine after the route settles.
+//   2. On retry, the Bluetooth route may keep renegotiating underneath the engine.
+//      Reinstalling the tap in that intermediate state can trip AVAudioEngine format
+//      assertions. Fix: reset the recorder and let AppState restart with a fresh
+//      engine after the route settles, while staying on the current system route.
 
 import AVFoundation
 import CoreAudio
@@ -66,10 +66,6 @@ final class AudioRecorder {
     private let _framesWritten = OSAllocatedUnfairLock(initialState: Int64(0))
     private let _droppedFrames = OSAllocatedUnfairLock(initialState: Int64(0))
 
-    /// If true, the next startRecording() will force the built-in microphone
-    /// instead of the system default (which may be stuck Bluetooth).
-    var useBuiltInMic = false
-
     func startRecording() throws -> URL {
         // Guard against double-start
         if isRecording {
@@ -90,14 +86,11 @@ final class AudioRecorder {
 
         AppDiagnostics.info(
             .audioRecorder,
-            "recording start requested session=\(sessionID) useBuiltInMic=\(useBuiltInMic) outputFile=\(fileURL.lastPathComponent) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
+            "recording start requested session=\(sessionID) outputFile=\(fileURL.lastPathComponent) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
         )
 
         let engine = AVAudioEngine()
         let inputNode = engine.inputNode
-
-        // If Bluetooth is stuck, override the engine's input to the built-in mic.
-        applyDeviceOverride(inputNode: inputNode)
 
         let inputFormat = inputNode.outputFormat(forBus: 0)
         AppDiagnostics.info(
@@ -259,41 +252,6 @@ final class AudioRecorder {
         }
     }
 
-    /// Re-applies the built-in mic device override on the given input node.
-    private func applyDeviceOverride(inputNode: AVAudioInputNode) {
-        guard useBuiltInMic, let builtInID = AudioDeviceDiagnostics.findBuiltInMicDevice(), let audioUnit = inputNode.audioUnit else {
-            if useBuiltInMic {
-                AppDiagnostics.warning(
-                    .audioRecorder,
-                    "built-in mic override unavailable session=\(recordingSessionID ?? "none") route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
-                )
-            }
-            return
-        }
-        var deviceID = builtInID
-        let status = AudioUnitSetProperty(
-            audioUnit,
-            kAudioOutputUnitProperty_CurrentDevice,
-            kAudioUnitScope_Global,
-            0,
-            &deviceID,
-            UInt32(MemoryLayout<AudioDeviceID>.size)
-        )
-        if status == noErr {
-            AppDiagnostics.info(
-                .audioRecorder,
-                "built-in mic override applied session=\(recordingSessionID ?? "none") deviceID=\(builtInID) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
-            )
-        } else {
-            AppDiagnostics.warning(
-                .audioRecorder,
-                "built-in mic override failed session=\(recordingSessionID ?? "none") status=\(status) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
-            )
-        }
-    }
-
-    // MARK: - Config change handling
-
     /// Hardware config changed (Bluetooth HFP settle, device disconnect, etc.).
     ///
     /// Two cases:
@@ -343,9 +301,6 @@ final class AudioRecorder {
 
             // Remove the old (now-dead) tap
             inputNode.removeTap(onBus: 0)
-
-            // Re-apply device override — config changes can reset it
-            applyDeviceOverride(inputNode: inputNode)
 
             let newFormat = inputNode.outputFormat(forBus: 0)
             if newFormat.sampleRate > 0 && newFormat.channelCount > 0 {
