@@ -24,3 +24,16 @@ Required verification evidence for a full send:
 - any failure in build, packaging, upload, install, launch, or verification must be surfaced immediately
 
 Do not call something a full send if it only compiles, only ships a commit, or only uploads a DMG.
+
+## Debug Research First
+
+For sticky debugging issues, hardware-related problems, Swift code issues, macOS platform behavior, Bluetooth issues, or anything that smells like a system/framework edge case, spend significant time searching the web for relevant context before attempting to debug.
+
+Expect to pull that external context into the working set first:
+
+- search for current Apple documentation, forum threads, bug reports, release notes, and credible writeups
+- look for version-specific Swift, AppKit, SwiftUI, macOS, CoreBluetooth, IOBluetooth, codesigning, sandboxing, and entitlement behavior
+- prefer gathering multiple relevant sources before forming a debugging plan
+- use that research to shape hypotheses, reproduction steps, instrumentation, and fixes instead of debugging from memory alone
+
+Do not treat these issues like ordinary local code bugs when the surrounding platform behavior is likely part of the problem. Research first, then debug.
