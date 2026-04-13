@@ -28,7 +28,7 @@ if [ -f "$RELEASE_CONFIG_FILE" ]; then
 fi
 
 DICTATR_CODESIGN_IDENTITY="${DICTATR_CODESIGN_IDENTITY:-}"
-DICTATR_CODESIGN_MODE="${DICTATR_CODESIGN_MODE:-developer_id}"
+DICTATR_CODESIGN_MODE="${DICTATR_CODESIGN_MODE:-adhoc}"
 DICTATR_SPCTL_EXPECT="${DICTATR_SPCTL_EXPECT:-}"
 VERBOSE_CHANGELOG_MIN_BULLETS=8
 VERBOSE_CHANGELOG_MIN_CHARS=1200
@@ -195,10 +195,6 @@ verify_signed_app() {
             fail "Unsupported DICTATR_SPCTL_EXPECT value: $DICTATR_SPCTL_EXPECT"
             ;;
     esac
-}
-
-requires_accessibility_regrant() {
-    [ "$DICTATR_CODESIGN_MODE" = "adhoc" ]
 }
 
 open_accessibility_settings() {

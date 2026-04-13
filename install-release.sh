@@ -78,15 +78,15 @@ else
     note "Installed app launch shows microphone authorization is not yet granted; DICTATR will surface microphone grant flow before recording."
 fi
 
-if requires_accessibility_regrant || rg -q "applicationDidFinishLaunching .*accessibilityTrusted=no" "$LATEST_LOG_PATH"; then
-    if requires_accessibility_regrant; then
-        note "Ad-hoc signing mode cannot preserve Accessibility trust across updates; resetting DICTATR's TCC entry and opening System Settings."
-    else
-        note "Accessibility trust is missing for the installed app; resetting TCC entry and opening System Settings."
-    fi
+if rg -q "applicationDidFinishLaunching .*accessibilityTrusted=no" "$LATEST_LOG_PATH"; then
+    note "Accessibility trust is missing for the installed app; resetting DICTATR's TCC entry and opening System Settings."
     tccutil reset Accessibility "$BUNDLE_ID"
     open_accessibility_settings
     fail "Accessibility must be re-enabled for $BUNDLE_ID. Re-enable DICTATR in System Settings, relaunch it, and rerun install-release.sh."
+fi
+
+if [ "$DICTATR_CODESIGN_MODE" = "adhoc" ]; then
+    note "Installed app retained Accessibility trust on this ad-hoc install, but future reinstalls or updates may still require re-enabling it."
 fi
 
 echo "Installed app verified at $INSTALLED_APP_PATH"

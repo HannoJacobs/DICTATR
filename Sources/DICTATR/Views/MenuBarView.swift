@@ -182,11 +182,6 @@ struct MenuBarView: View {
             }
             .opacity(appState.currentState == .transcribing || !appState.isModelLoaded ? 0.4 : 1)
 
-            menuRow("Hard Reset Audio", icon: "bolt.horizontal.circle") {
-                appState.hardResetAudioContention()
-            }
-            .opacity(appState.canHardResetAudio ? 1 : 0.4)
-
             Divider()
 
             menuRow(
