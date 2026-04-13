@@ -1,5 +1,9 @@
 # Audio Follow-up Postmortem: Crash Fixes and Reconnect Loop
 
+> Current canonical Bluetooth investigation/resolution doc: [`docs/bluetooth_audio_resolution_2026-04-13.md`](/Users/hannojacobs/Documents/Code/DICTATR/docs/bluetooth_audio_resolution_2026-04-13.md)
+>
+> Read that document first for the installed-build evidence, Apple-source summary, and the current engine-versus-capture resolution path. This file remains the historical record for the `v1.8`–`v1.15` reconnect-loop and teardown-fix work.
+
 **Status:** Seems improved in `v1.11`–`v1.13`; `v1.15` adds persistent diagnostics so future regressions can be traced from one launch log instead of depending on unified logging alone.
 **Files:** `Sources/DICTATR/AudioRecorder.swift`, `Sources/DICTATR/AppState.swift`, `create-dmg.sh`
 **Related doc:** `docs/audio_bug_postmortem.md`

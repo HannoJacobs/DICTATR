@@ -590,7 +590,7 @@ final class AppState {
                 AppDiagnostics.info(.appState, "Route retry cancelled before execution context={\(RecordingDiagnostics.shared.contextSnapshot())}")
                 return
             }
-            await self.waitForStableRouteBeforeRetry(
+            self.recordRetryPreflightRouteSummary(
                 reason: event.reason,
                 recoveryCycleID: recoveryCycleID,
                 requiredStableWindowMs: routeStabilityRequiredMs
@@ -701,38 +701,16 @@ final class AppState {
         }
     }
 
-    private func waitForStableRouteBeforeRetry(
+    private func recordRetryPreflightRouteSummary(
         reason: RecordingFailureReason,
         recoveryCycleID: String,
         requiredStableWindowMs: Int
-    ) async {
-        RecordingDiagnostics.shared.recordRetryDecision(
-            .retryWaitStarted,
-            detail: "reason=\(reason.rawValue) route_considered_stable=no stableWindowMs=\(requiredStableWindowMs) recoveryCycle=\(recoveryCycleID)"
-        )
-        var extensions = 0
-        while extensions < 3 {
-            let lastObservedRouteChangeMsAgo = RecordingDiagnostics.shared.millisecondsSinceLastRouteChange()
-            if lastObservedRouteChangeMsAgo >= requiredStableWindowMs {
-                RecordingDiagnostics.shared.recordRetryDecision(
-                    .retryWaitCompleted,
-                    detail: "reason=\(reason.rawValue) route_considered_stable=yes stableWindowMs=\(requiredStableWindowMs) lastObservedRouteChangeMsAgo=\(lastObservedRouteChangeMsAgo) recoveryCycle=\(recoveryCycleID)"
-                )
-                return
-            }
-
-            let extraDelayMs = requiredStableWindowMs - lastObservedRouteChangeMsAgo + 200
-            extensions += 1
-            RecordingDiagnostics.shared.recordRetryDecision(
-                .retryWaitExtendedDueToRouteChange,
-                detail: "reason=\(reason.rawValue) extraDelayForRecentRouteChurnMs=\(extraDelayMs) stableWindowMs=\(requiredStableWindowMs) lastObservedRouteChangeMsAgo=\(lastObservedRouteChangeMsAgo) recoveryCycle=\(recoveryCycleID)"
-            )
-            try? await Task.sleep(for: .milliseconds(extraDelayMs))
-        }
-
+    ) {
+        let lastObservedRouteChangeMsAgo = RecordingDiagnostics.shared.millisecondsSinceLastRouteChange()
+        let routeState = AudioDeviceDiagnostics.currentRouteState()
         RecordingDiagnostics.shared.recordRetryDecision(
             .retryWaitCompleted,
-            detail: "reason=\(reason.rawValue) route_considered_stable=no stableWindowMs=\(requiredStableWindowMs) lastObservedRouteChangeMsAgo=\(RecordingDiagnostics.shared.millisecondsSinceLastRouteChange()) recoveryCycle=\(recoveryCycleID)"
+            detail: "reason=\(reason.rawValue) route_considered_stable=\(AppDiagnostics.boolLabel(lastObservedRouteChangeMsAgo >= requiredStableWindowMs)) stableWindowMs=\(requiredStableWindowMs) lastObservedRouteChangeMsAgo=\(lastObservedRouteChangeMsAgo) routeAgeIsAdvisoryOnly=yes graphReadyDeterminedByEngineStart=yes recoveryCycle=\(recoveryCycleID) routeFingerprint=\(routeState.fingerprint)"
         )
     }
 

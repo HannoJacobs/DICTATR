@@ -130,6 +130,7 @@ enum RecoveryDecision: String {
     case retryAbortedDueToStateChange = "retry_aborted_due_to_state_change"
     case retryAbortedDueToPermissionChange = "retry_aborted_due_to_permission_change"
     case retryAbortedDueToRouteUnstable = "retry_aborted_due_to_route_unstable"
+    case retryAbortedGraphStillStale = "retry_aborted_graph_still_stale"
     case retryBudgetExceeded = "retry_budget_exceeded"
     case duplicateFailureCoalesced = "duplicate_failure_coalesced"
 }

@@ -1,5 +1,9 @@
 # Audio Bug Postmortem: Bluetooth Headphone Recording Failure
 
+> Current canonical Bluetooth investigation/resolution doc: [`docs/bluetooth_audio_resolution_2026-04-13.md`](/Users/hannojacobs/Documents/Code/DICTATR/docs/bluetooth_audio_resolution_2026-04-13.md)
+>
+> Read that document first for the current diagnosis, current code shape, Apple-source summary, and next-step decision rule. This file remains historical background for the original `v1.3` / `v1.4` fixes.
+
 **Status:** RESOLVED in v1.3, follow-up fix in v1.4 (2026-03-09)
 **Files:** `Sources/DICTATR/AudioRecorder.swift`, `Sources/DICTATR/AppState.swift`
 **See also:** `docs/audio_followup_postmortem.md` for the later `v1.8`-`v1.11` crash-fix and reconnect-loop history

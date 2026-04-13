@@ -25,5 +25,10 @@ let package = Package(
             path: "Sources/DICTATR",
             exclude: ["Info.plist"]
         ),
+        .testTarget(
+            name: "DICTATRTests",
+            dependencies: ["DICTATR"],
+            path: "Tests/DICTATRTests"
+        ),
     ]
 )
