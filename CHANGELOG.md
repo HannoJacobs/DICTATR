@@ -4,6 +4,9 @@
 - Replaced the old hand-built DMG wrapper with an archive-based release path that packages the real macOS app bundle instead of reconstructing `Contents/` around a raw binary.
 - Added centralized release signing config in `release.env`, fail-fast signing checks, designated-requirement validation, and configurable `spctl` verification so DICTATR ships with a stable code identity instead of a per-build `cdhash`.
 - Added `install-release.sh` to install the archived app to `/Applications/DICTATR.app`, verify the installed signature and launch log, and surface missing Accessibility trust by resetting DICTATR's TCC entry and opening the Accessibility pane.
+- Fixed the local release installer so it terminates any already-running DICTATR process before reinstalling, ensuring full-send verification checks a fresh launch of the installed app instead of reactivating an older session.
+- Fixed the launch-log verification matcher in `install-release.sh` so it matches the actual runtime diagnostic field order emitted by DICTATR.
+- Fixed fresh-launch detection in `install-release.sh` so it verifies against the new `latest.log` target created for the relaunched app, rather than comparing launch counts across different log files.
 - Added an explicit `adhoc` release mode for local non-Developer-ID builds. That mode still verifies the shipped app and launch log, but it now explicitly forces the Accessibility re-enable flow because trust persistence is impossible without stable signing.
 - Launch diagnostics now record `accessibilityTrusted=yes|no`, so full-send verification can prove whether the installed app retained Accessibility permission after an upgrade.
 
