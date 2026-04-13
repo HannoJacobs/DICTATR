@@ -3,8 +3,12 @@ import AppKit
 final class DICTATRAppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppDiagnostics.info(
+            .audioDevices,
+            "audio device snapshot at launch route=\(AudioDeviceDiagnostics.currentRouteSnapshot()) devices=\(AudioDeviceDiagnostics.availableDevicesSnapshot())"
+        )
+        AppDiagnostics.info(
             .lifecycle,
-            "applicationDidFinishLaunching \(AppDiagnostics.runtimeSummary) accessibilityTrusted=\(PasteManager.accessibilityStatusSummary()) route=\(AudioDeviceDiagnostics.currentRouteSnapshot()) devices=\(AudioDeviceDiagnostics.availableDevicesSnapshot())"
+            "applicationDidFinishLaunching \(AppDiagnostics.runtimeSummary) accessibilityTrusted=\(PasteManager.accessibilityStatusSummary()) microphoneStatus=\(MicrophonePermissionManager.authorizationStatusSummary()) route=\(AudioDeviceDiagnostics.currentRouteSnapshot()) devices=\(AudioDeviceDiagnostics.availableDevicesSnapshot())"
         )
     }
 

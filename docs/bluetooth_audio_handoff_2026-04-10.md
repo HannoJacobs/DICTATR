@@ -8,6 +8,7 @@ The main corrective point is simple:
 
 - Bluetooth microphone support previously worked in DICTATR with both AirPods 3 and Bose QC45.
 - The current failure is therefore a regression or a newly-triggered breakage, not evidence that Bluetooth input is categorically unsupported.
+- Product constraint: if the user is dictating through headphones, DICTATR must use the headphone microphone. Falling back to the built-in mic is not an acceptable fix.
 
 ## Current User-Visible Symptom
 
@@ -92,7 +93,9 @@ That sequence shows:
 So there are two distinct truths:
 
 - Bluetooth definitely worked before
-- the current recovery path can still collapse into a zero-frame session after route churn
+- the historical recovery path could collapse into a zero-frame session after route churn
+
+That fallback path is now explicitly considered the wrong product behavior. A future fix must preserve headset input instead of switching to the MacBook mic.
 
 ## New Hard Evidence From Today's Unified Log
 

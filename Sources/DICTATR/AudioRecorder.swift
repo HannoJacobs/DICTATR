@@ -86,7 +86,7 @@ final class AudioRecorder {
 
         AppDiagnostics.info(
             .audioRecorder,
-            "recording start requested session=\(sessionID) outputFile=\(fileURL.lastPathComponent) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
+            "recording start requested session=\(sessionID) outputFile=\(fileURL.lastPathComponent) route=\(AudioDeviceDiagnostics.currentRouteSnapshot()) devices=\(AudioDeviceDiagnostics.availableDevicesSnapshot())"
         )
 
         let engine = AVAudioEngine()
@@ -273,7 +273,7 @@ final class AudioRecorder {
         let elapsed = elapsedRecordingTime()
         AppDiagnostics.warning(
             .audioRecorder,
-            "config change received session=\(recordingSessionID ?? "none") engineRunning=\(engine.isRunning) elapsed=\(elapsed) frames=\(frames) dropped=\(dropped) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
+            "config change received session=\(recordingSessionID ?? "none") engineRunning=\(engine.isRunning) elapsed=\(elapsed) frames=\(frames) dropped=\(dropped) route=\(AudioDeviceDiagnostics.currentRouteSnapshot()) devices=\(AudioDeviceDiagnostics.availableDevicesSnapshot())"
         )
 
         let routeInvolvesBluetooth = activeRouteInvolvesBluetooth || AudioDeviceDiagnostics.activeRouteInvolvesBluetooth()
@@ -396,7 +396,7 @@ final class AudioRecorder {
 
         AppDiagnostics.info(
             .audioRecorder,
-            "recording stopped session=\(sessionID) duration=\(String(format: "%.3f", duration))s frames=\(frames) dropped=\(dropped) file=\(url.lastPathComponent) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
+            "recording stopped session=\(sessionID) duration=\(String(format: "%.3f", duration))s frames=\(frames) dropped=\(dropped) file=\(url.lastPathComponent) route=\(AudioDeviceDiagnostics.currentRouteSnapshot()) fileExists=\(AppDiagnostics.boolLabel(FileManager.default.fileExists(atPath: url.path)))"
         )
         recordingSessionID = nil
 
@@ -410,7 +410,7 @@ final class AudioRecorder {
         let dropped = _droppedFrames.withLock { $0 }
         AppDiagnostics.warning(
             .audioRecorder,
-            "force reset session=\(sessionID) reason=\(reason) elapsed=\(elapsedRecordingTime()) frames=\(frames) dropped=\(dropped) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
+            "force reset session=\(sessionID) reason=\(reason) elapsed=\(elapsedRecordingTime()) frames=\(frames) dropped=\(dropped) route=\(AudioDeviceDiagnostics.currentRouteSnapshot()) devices=\(AudioDeviceDiagnostics.availableDevicesSnapshot())"
         )
         _isCapturing.withLock { $0 = false }
 

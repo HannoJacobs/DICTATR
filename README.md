@@ -74,12 +74,12 @@ Mach-O binary into a synthetic app bundle.
 ### Permissions after installing from DMG
 The Xcode-run app and the shipped `/Applications/DICTATR.app` are still different app
 instances, so the first installed release still needs permissions granted once:
-- **Microphone** — prompted automatically
+- **Microphone** — prompted automatically on first use, and may need to be re-granted after an ad-hoc reinstall
 - **Accessibility** — must grant manually in System Settings → Privacy & Security → Accessibility
 
 If you use `DICTATR_CODESIGN_MODE="adhoc"`, upgrades will still require Accessibility to be
-re-enabled after install. That mode is supported for local use, but it cannot preserve trust
-across releases.
+re-enabled after install. Microphone trust may also need to be re-granted. That mode is
+supported for local use, but it cannot preserve trust across releases.
 
 If you use `DICTATR_CODESIGN_MODE="developer_id"` with a stable Developer ID certificate,
 normal upgrades should keep Accessibility trust.
@@ -109,19 +109,26 @@ each release, but there is now a single source of truth.
 # 0. Bump version in Sources/DICTATR/Info.plist
 #    Update CFBundleVersion and CFBundleShortVersionString
 
-# 1. Create release.env from release.env.example
+# 1. Expand CHANGELOG.md for that exact version with very verbose notes
+#    Minimum enforced by create-dmg.sh:
+#    - at least 8 bullet points
+#    - at least 1200 characters in the current version section
+#    The entry should explain the user-visible regression/fix, root cause,
+#    code-path changes, release or permission changes, and concrete verification.
+
+# 2. Create release.env from release.env.example
 #    and set:
 #    - DICTATR_CODESIGN_MODE=adhoc or developer_id
 #    - DICTATR_SPCTL_EXPECT
 #    - DICTATR_CODESIGN_IDENTITY (developer_id mode only)
 
-# 2. Build, sign, verify, and package the DMG
+# 3. Build, sign, verify, and package the DMG
 bash create-dmg.sh
 
-# 3. Install and verify the built app locally
+# 4. Install and verify the built app locally
 bash install-release.sh
 
-# 4. Create a GitHub release and upload the DMG
+# 5. Create a GitHub release and upload the DMG
 gh release create v1.1 DICTATR.dmg \
   --title "DICTATR v1.1" \
   --notes "What changed in this version."
@@ -182,7 +189,7 @@ What gets logged:
 - App launch / reopen with version, build, PID, macOS build, hardware model, bundle path, diagnostics file path, and Accessibility trust status
 - Model startup with selected WhisperKit variant, resolved model folder, compiled-cache snapshot, download milestones, per-phase timings, and long-load heartbeats
 - Full audio device inventory at launch
-- Recording start, input format, built-in mic override attempts, config changes, watchdog failures, retries, and force resets
+- Recording start, input format, config changes, watchdog failures, retries, and force resets
 - Stop/transcription/paste/history-save transitions
 
 Normal relaunches now prefer the local cached model folder directly when it already exists,
@@ -193,7 +200,7 @@ Useful commands:
 ```bash
 tail -f ~/Library/Application\ Support/DICTATR/Logs/latest.log
 ls -lt ~/Library/Application\ Support/DICTATR/Logs
-rg -n "watchdog|config change|retry|force reset|built-in mic|recording start" ~/Library/Application\ Support/DICTATR/Logs/latest.log
+rg -n "watchdog|config change|retry|force reset|recording start" ~/Library/Application\ Support/DICTATR/Logs/latest.log
 ```
 
 If DICTATR is stuck in a Bluetooth / HFP route fight, the menu now includes `Hard Reset Audio`.

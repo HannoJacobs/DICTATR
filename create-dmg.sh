@@ -13,7 +13,10 @@ require_command ditto
 
 require_file "$WORKSPACE_PATH"
 require_file "$SOURCE_PLIST"
+require_file "$CHANGELOG_PATH"
+require_file "$APP_ENTITLEMENTS_PATH"
 require_file "$SCRIPT_DIR/AppIcon.icns"
+verify_verbose_changelog_entry
 
 note "Building Release archive"
 rm -rf "$BUILD_DIR" "$DMG_PATH"
@@ -47,12 +50,25 @@ done
 assert_bundle_metadata "$ARCHIVED_APP_PATH"
 
 note "Signing archived app with $(codesign_identity_label)"
-codesign \
-    --force \
-    --deep \
-    ${DICTATR_CODESIGN_MODE:+--options runtime} \
-    --sign "$(codesign_identity_label)" \
-    "$ARCHIVED_APP_PATH"
+codesign_args=(
+    --force
+    --deep
+    --entitlements "$APP_ENTITLEMENTS_PATH"
+    --sign "$(codesign_identity_label)"
+)
+
+case "$DICTATR_CODESIGN_MODE" in
+    developer_id)
+        codesign_args+=(--options runtime)
+        ;;
+    adhoc)
+        ;;
+    *)
+        fail "Unsupported DICTATR_CODESIGN_MODE value: $DICTATR_CODESIGN_MODE"
+        ;;
+esac
+
+codesign "${codesign_args[@]}" "$ARCHIVED_APP_PATH"
 
 verify_signed_app "$ARCHIVED_APP_PATH"
 

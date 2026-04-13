@@ -9,6 +9,8 @@ BUNDLE_ID="com.hannojacobs.DICTATR"
 SCHEME_NAME="DICTATR"
 WORKSPACE_PATH="$SCRIPT_DIR/.swiftpm/xcode/package.xcworkspace"
 SOURCE_PLIST="$SCRIPT_DIR/Sources/DICTATR/Info.plist"
+CHANGELOG_PATH="$SCRIPT_DIR/CHANGELOG.md"
+APP_ENTITLEMENTS_PATH="$SCRIPT_DIR/DICTATR.entitlements"
 BUILD_DIR="$SCRIPT_DIR/build-release"
 ARCHIVE_PATH="$BUILD_DIR/${APP_NAME}.xcarchive"
 ARCHIVE_BINARY_PATH="$ARCHIVE_PATH/Products/usr/local/bin/$APP_NAME"
@@ -28,6 +30,8 @@ fi
 DICTATR_CODESIGN_IDENTITY="${DICTATR_CODESIGN_IDENTITY:-}"
 DICTATR_CODESIGN_MODE="${DICTATR_CODESIGN_MODE:-developer_id}"
 DICTATR_SPCTL_EXPECT="${DICTATR_SPCTL_EXPECT:-}"
+VERBOSE_CHANGELOG_MIN_BULLETS=8
+VERBOSE_CHANGELOG_MIN_CHARS=1200
 
 fail() {
     echo "Error: $*" >&2
@@ -46,6 +50,47 @@ require_command() {
 require_file() {
     local path="$1"
     [ -e "$path" ] || fail "Missing required path: $path"
+}
+
+changelog_entry_for_version() {
+    local version="$1"
+    awk -v version="$version" '
+        $0 == "## " version { in_section=1; found=1; next }
+        /^## / && in_section { exit }
+        in_section { print }
+        END {
+            if (!found) {
+                exit 2
+            }
+        }
+    ' "$CHANGELOG_PATH"
+}
+
+verify_verbose_changelog_entry() {
+    local version entry bullet_count char_count
+
+    require_file "$CHANGELOG_PATH"
+    version="$(app_version)"
+    entry="$(changelog_entry_for_version "$version")" || fail "CHANGELOG.md is missing a section for version $version."
+
+    bullet_count="$(grep -c '^- ' <<<"$entry" || true)"
+    char_count="$(printf '%s' "$entry" | tr -d '\n' | wc -c | tr -d '[:space:]')"
+
+    [ "$bullet_count" -ge "$VERBOSE_CHANGELOG_MIN_BULLETS" ] || \
+        fail "CHANGELOG.md entry for version $version is not verbose enough: found $bullet_count bullet(s), expected at least $VERBOSE_CHANGELOG_MIN_BULLETS."
+
+    [ "$char_count" -ge "$VERBOSE_CHANGELOG_MIN_CHARS" ] || \
+        fail "CHANGELOG.md entry for version $version is not verbose enough: found $char_count characters, expected at least $VERBOSE_CHANGELOG_MIN_CHARS."
+
+    note "CHANGELOG.md verbosity verified for version $version bullets=$bullet_count chars=$char_count"
+}
+
+require_microphone_entitlement() {
+    local entitlements_output="$1"
+    grep -q "com.apple.security.device.audio-input" <<<"$entitlements_output" || \
+        fail "Signed app is missing com.apple.security.device.audio-input entitlement."
+    grep -qE '(<true/>|\[Bool\][[:space:]]+true)' <<<"$entitlements_output" || \
+        fail "Signed app does not enable com.apple.security.device.audio-input."
 }
 
 plist_value() {
@@ -91,7 +136,7 @@ assert_bundle_metadata() {
 
 verify_signed_app() {
     local app_path="$1"
-    local codesign_output requirement_output spctl_output spctl_rc
+    local codesign_output requirement_output spctl_output spctl_rc entitlements_output flags_line
 
     require_file "$app_path"
     assert_bundle_metadata "$app_path"
@@ -102,6 +147,21 @@ verify_signed_app() {
 
     grep -q "Identifier=$BUNDLE_ID" <<<"$codesign_output" || fail "codesign identifier mismatch for $app_path"
     grep -q "Info.plist=not bound" <<<"$codesign_output" && fail "codesign metadata shows Info.plist is not bound for $app_path"
+
+    flags_line="$(grep '^CodeDirectory ' <<<"$codesign_output" || true)"
+    case "$DICTATR_CODESIGN_MODE" in
+        developer_id)
+            grep -q 'runtime' <<<"$flags_line" || fail "Developer ID signing must enable hardened runtime."
+            ;;
+        adhoc)
+            grep -q 'runtime' <<<"$flags_line" && fail "Ad-hoc signing must not enable hardened runtime."
+            ;;
+    esac
+
+    note "embedded entitlements for $app_path"
+    entitlements_output="$(codesign -d --entitlements - "$app_path" 2>&1)" || fail "Failed to read embedded entitlements for $app_path"
+    printf '%s\n' "$entitlements_output"
+    require_microphone_entitlement "$entitlements_output"
 
     note "designated requirement for $app_path"
     requirement_output="$(codesign -d -r- "$app_path" 2>&1)" || fail "designated requirement read failed for $app_path"

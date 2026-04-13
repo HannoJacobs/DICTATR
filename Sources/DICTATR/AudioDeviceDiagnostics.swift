@@ -3,11 +3,19 @@ import Foundation
 
 enum AudioDeviceDiagnostics {
     static func currentRouteSnapshot() -> String {
-        let defaultInput = describeDevice(defaultDevice(selector: kAudioHardwarePropertyDefaultInputDevice))
-        let defaultOutput = describeDevice(defaultDevice(selector: kAudioHardwarePropertyDefaultOutputDevice))
-        let builtInMic = describeDevice(findBuiltInMicDevice())
+        let defaultInputDevice = defaultDevice(selector: kAudioHardwarePropertyDefaultInputDevice)
+        let defaultOutputDevice = defaultDevice(selector: kAudioHardwarePropertyDefaultOutputDevice)
+        let builtInMicDevice = findBuiltInMicDevice()
+        let defaultInput = describeDevice(defaultInputDevice)
+        let defaultOutput = describeDevice(defaultOutputDevice)
+        let builtInMic = describeDevice(builtInMicDevice)
 
-        return "defaultInput={\(defaultInput)} defaultOutput={\(defaultOutput)} builtInMic={\(builtInMic)}"
+        return [
+            "defaultInput={\(defaultInput)}",
+            "defaultOutput={\(defaultOutput)}",
+            "builtInMic={\(builtInMic)}",
+            inputSelectionSnapshot(defaultInput: defaultInputDevice, builtInMic: builtInMicDevice)
+        ].joined(separator: " ")
     }
 
     static func availableDevicesSnapshot() -> String {
@@ -42,6 +50,25 @@ enum AudioDeviceDiagnostics {
 
     static func activeRouteInvolvesBluetooth() -> Bool {
         defaultInputIsBluetooth() || defaultOutputIsBluetooth()
+    }
+
+    static func inputSelectionSnapshot(defaultInput: AudioDeviceID? = nil, builtInMic: AudioDeviceID? = nil) -> String {
+        let resolvedDefaultInput = defaultInput ?? defaultDevice(selector: kAudioHardwarePropertyDefaultInputDevice)
+        let resolvedBuiltInMic = builtInMic ?? findBuiltInMicDevice()
+        let defaultTransport = transportLabel(resolvedDefaultInput.flatMap(transportType(for:)))
+        let builtInAvailable = resolvedBuiltInMic != nil
+        let defaultIsBuiltInMic = resolvedDefaultInput != nil && resolvedDefaultInput == resolvedBuiltInMic
+
+        return [
+            "inputSelection={",
+            "defaultInputIsBluetooth=\(AppDiagnostics.boolLabel(defaultInputIsBluetooth()))",
+            "defaultOutputIsBluetooth=\(AppDiagnostics.boolLabel(defaultOutputIsBluetooth()))",
+            "defaultInputTransport=\(defaultTransport)",
+            "builtInMicAvailable=\(AppDiagnostics.boolLabel(builtInAvailable))",
+            "defaultInputMatchesBuiltInMic=\(AppDiagnostics.boolLabel(defaultIsBuiltInMic))",
+            "activeRouteInvolvesBluetooth=\(AppDiagnostics.boolLabel(activeRouteInvolvesBluetooth()))",
+            "}"
+        ].joined(separator: " ")
     }
 
     private static func allDevices() -> [AudioDeviceID] {

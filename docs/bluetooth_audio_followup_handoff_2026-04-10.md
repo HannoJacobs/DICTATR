@@ -20,6 +20,11 @@ This document is meant to be read together with:
 - [Sources/DICTATR/AudioDeviceDiagnostics.swift](/Users/hannojacobs/Documents/Code/DICTATR/Sources/DICTATR/AudioDeviceDiagnostics.swift)
 - [Sources/DICTATR/AppState.swift](/Users/hannojacobs/Documents/Code/DICTATR/Sources/DICTATR/AppState.swift)
 
+## Product Constraint
+
+- If the user is using headphones, DICTATR must use the headphones microphone.
+- Falling back to the built-in mic is not an acceptable shipped workaround for Bluetooth regressions.
+
 ## Short Version
 
 The previous handoff identified one concrete app-side bug:
@@ -37,10 +42,9 @@ The newest evidence from this chat suggests a different current bug:
 
 - the new restart rule is too broad
 - DICTATR currently treats **any** Bluetooth involvement in the active route as a reason to tear down the session
-- that includes the case where AirPods are still the default Bluetooth output while DICTATR is trying to fall back to the MacBook built-in mic
-- as a result, DICTATR repeatedly self-resets before the built-in-mic route can settle
+- as a result, DICTATR repeatedly self-resets before the Bluetooth headset route can settle
 
-Built-in mic still works.
+Built-in mic still works, but that is diagnostic context rather than an acceptable product fallback.
 
 AirPods currently do not work reliably in the shipped `v1.21` build.
 

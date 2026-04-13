@@ -70,6 +70,13 @@ done
 note "Launch verification evidence"
 rg -n "applicationDidFinishLaunching .*version=$expected_version .*build=$expected_build .*bundlePath=$INSTALLED_APP_PATH" "$LATEST_LOG_PATH"
 rg -n "applicationDidFinishLaunching .*accessibilityTrusted=(yes|no)" "$LATEST_LOG_PATH" || fail "Launch log did not record accessibilityTrusted status."
+rg -n "applicationDidFinishLaunching .*microphoneStatus=[^ ]+" "$LATEST_LOG_PATH" || fail "Launch log did not record microphoneStatus."
+
+if rg -q "applicationDidFinishLaunching .*microphoneStatus=authorized" "$LATEST_LOG_PATH"; then
+    note "Installed app retained microphone authorization."
+else
+    note "Installed app launch shows microphone authorization is not yet granted; DICTATR will surface microphone grant flow before recording."
+fi
 
 if requires_accessibility_regrant || rg -q "applicationDidFinishLaunching .*accessibilityTrusted=no" "$LATEST_LOG_PATH"; then
     if requires_accessibility_regrant; then
