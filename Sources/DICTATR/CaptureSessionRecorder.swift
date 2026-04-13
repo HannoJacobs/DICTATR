@@ -99,7 +99,12 @@ final class CaptureSessionRecorder: NSObject, AVCaptureAudioDataOutputSampleBuff
         selectedDeviceInput = input
 
         session.beginConfiguration()
-        defer { session.commitConfiguration() }
+        var shouldCommitConfigurationInDefer = true
+        defer {
+            if shouldCommitConfigurationInDefer {
+                session.commitConfiguration()
+            }
+        }
 
         for existingInput in session.inputs {
             session.removeInput(existingInput)
@@ -121,6 +126,9 @@ final class CaptureSessionRecorder: NSObject, AVCaptureAudioDataOutputSampleBuff
         }
 
         captureOutput.setSampleBufferDelegate(self, queue: sampleQueue)
+        session.commitConfiguration()
+        shouldCommitConfigurationInDefer = false
+
         installObservers(for: device)
 
         let startupStream = makeStartupStream(timeoutMs: startupTimeoutMs)
