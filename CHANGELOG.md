@@ -1,6 +1,7 @@
 # Changelog
 
 Changelog policy:
+- Current known-status caveat: the installed-build dictation regression is fixed and verified, but the earlier Bluetooth-specific route/recovery issue is still not conclusively fixed. Until a focused Bluetooth retest proves otherwise, release notes should not claim that Bluetooth dictation reliability is resolved.
 - Every shipped version entry must be written as a detailed operator-facing record, not a terse marketing summary.
 - The current release entry is required to be very verbose: the release pipeline now fails if the section for the bundled app version has fewer than 8 bullet points or fewer than 1200 characters.
 - Each new entry should explain the user-visible problem, the technical root cause, the code-path changes, the release/signing or operational changes when relevant, and the concrete verification outcome.
