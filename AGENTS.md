@@ -23,6 +23,13 @@ Required verification evidence for a full send:
 - the installed app log must show the requested behavior is live when that behavior can be exercised locally
 - any failure in build, packaging, upload, install, launch, or verification must be surfaced immediately
 
+Accessibility trust and microphone permission are special cases for local full-send verification on this Mac:
+
+- If the newly installed app launches from `/Applications/DICTATR.app` with the expected version/build, but the log still shows `accessibilityTrusted=no` or `microphoneStatus=notDetermined|denied`, treat that as a required user handoff step, not as a reason to discard the rest of the full-send work.
+- Surface it clearly and briefly as: “local permission step still required: re-enable Accessibility and/or grant Microphone to `/Applications/DICTATR.app`, then continue verification.”
+- After the user grants the permission, continue verification from the same installed app flow and use the installed app log as evidence of the permission transition plus the requested behavior.
+- Do not keep re-framing this permission handoff as a packaging or build failure once install and launch verification have already succeeded.
+
 Do not call something a full send if it only compiles, only ships a commit, or only uploads a DMG.
 
 ## Debug Research First
