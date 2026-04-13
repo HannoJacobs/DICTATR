@@ -17,7 +17,8 @@
 //
 // RECORDING PIPELINE:
 //   toggleRecording() → startRecording()
-//     → AVAudioEngine tap writes 16kHz WAV to temp dir
+//     → AVCaptureSession audio output writes native mic samples
+//     → AVAudioConverter writes 16kHz WAV to temp dir
 //     → RecordingIndicatorPanel shown (floating overlay)
 //   toggleRecording() → stopRecordingAndTranscribe()
 //     → WAV file → WhisperKit → text
@@ -374,7 +375,7 @@ final class AppState {
         )
         switch currentState {
         case .idle:
-            if recordingStartTask != nil {
+            if recordingStartTask != nil || audioRecorder.isRecording {
                 statusMessage = microphonePermissionStatus == .notDetermined ? "Requesting microphone access..." : "Starting recording..."
                 errorMessage = "Recording start is already in progress. Please wait."
                 AppDiagnostics.warning(.appState, "toggleRecording ignored because recording start is already in progress")
@@ -462,7 +463,7 @@ final class AppState {
             "startRecording requested context={\(RecordingDiagnostics.shared.contextSnapshot(extra: ["cause": "user_hotkey"]))} retryCount=\(autoRetryCount) snapshot={\(stateSnapshot())} devices=\(AudioDeviceDiagnostics.availableDevicesSnapshot())"
         )
         do {
-            let url = try audioRecorder.startRecording(metadata: .userHotkey)
+            let url = try await audioRecorder.startRecording(metadata: .userHotkey)
             currentState = .recording
             statusMessage = "Recording..."
             errorMessage = nil
@@ -597,8 +598,7 @@ final class AppState {
                 recoveryCycleID: recoveryCycleID,
                 requiredStableWindowMs: routeStabilityRequiredMs
             )
-            self.recordingRecoveryPending = false
-            self.retryStartRecording()
+            await self.retryStartRecording()
         }
     }
 
@@ -610,7 +610,7 @@ final class AppState {
         return reason.isBluetoothRelated ? 2.0 : 1.5
     }
 
-    private func retryStartRecording() {
+    private func retryStartRecording() async {
         guard transcriptionEngine.isModelLoaded else { return }
         refreshPermissionStates(source: "retryStartRecording")
         guard microphonePermissionStatus.isAuthorized else {
@@ -640,7 +640,7 @@ final class AppState {
         )
 
         do {
-            let url = try audioRecorder.startRecording(
+            let url = try await audioRecorder.startRecording(
                 metadata: RecordingAttemptMetadata(
                     trigger: "retry_scheduler",
                     recoveryCycleID: activeRecoveryCycleID,
@@ -657,11 +657,13 @@ final class AppState {
             )
             RecordingDiagnostics.shared.completeRecoveryCycleIfNeeded()
             activeRecoveryCycleID = nil
+            recordingRecoveryPending = false
             AppDiagnostics.info(
                 .appState,
                 "retry succeeded context={\(RecordingDiagnostics.shared.contextSnapshot())} session=\(audioRecorder.recordingSessionID ?? "none") file=\(url.lastPathComponent) snapshot={\(stateSnapshot())}"
             )
         } catch {
+            recordingRecoveryPending = false
             let reason = RecordingFailureReason.from(error: error)
             RecordingDiagnostics.shared.recordRetryDecision(
                 .retryFailed,

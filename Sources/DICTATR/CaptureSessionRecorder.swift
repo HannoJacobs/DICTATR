@@ -3,7 +3,24 @@ import CoreMedia
 import Foundation
 import os
 
-final class CaptureSessionRecorder {
+struct CaptureSessionStartResult {
+    let selectedDeviceUID: String
+    let selectedDeviceName: String
+    let firstSampleFormat: AudioGraphFormatSnapshot
+}
+
+struct CaptureSessionFailureEvent {
+    let reason: RecordingFailureReason
+    let detail: String
+}
+
+final class CaptureSessionRecorder: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate {
+    private struct StartupWaitState {
+        var continuation: AsyncThrowingStream<CaptureSessionStartResult, Error>.Continuation?
+        var timeoutTask: Task<Void, Never>?
+        var completed = false
+    }
+
     private let targetFormat: AVAudioFormat
     private let outputFile: AVAudioFile
     private let isCapturing: OSAllocatedUnfairLock<Bool>
@@ -12,12 +29,25 @@ final class CaptureSessionRecorder {
     private let captureStats: OSAllocatedUnfairLock<RealtimeCaptureStats>
     private let onFirstSample: @MainActor (AudioGraphFormatSnapshot) -> Void
     private let onEvent: @MainActor (String, String) -> Void
+    private let onFailure: @MainActor (CaptureSessionFailureEvent) -> Void
 
     private let session = AVCaptureSession()
     private let captureOutput = AVCaptureAudioDataOutput()
     private let sessionQueue = DispatchQueue(label: "com.dictatr.capture-session.control")
     private let sampleQueue = DispatchQueue(label: "com.dictatr.capture-session.samples")
-    private let sampleSink: CaptureSessionSampleSink
+    private let startupWaitState = OSAllocatedUnfairLock(initialState: StartupWaitState())
+
+    private var runtimeErrorObserver: NSObjectProtocol?
+    private var sessionInterruptedObserver: NSObjectProtocol?
+    private var sessionInterruptionEndedObserver: NSObjectProtocol?
+    private var deviceDisconnectedObserver: NSObjectProtocol?
+
+    private var selectedDeviceUID = "unknown"
+    private var selectedDeviceName = "unknown"
+    private var selectedDeviceInput: AVCaptureDeviceInput?
+    private var converter: AVAudioConverter?
+    private var sourceFormatSnapshot: AudioGraphFormatSnapshot?
+    private var hasDeliveredFirstSample = false
 
     init(
         targetFormat: AVAudioFormat,
@@ -27,7 +57,8 @@ final class CaptureSessionRecorder {
         droppedFrames: OSAllocatedUnfairLock<Int64>,
         captureStats: OSAllocatedUnfairLock<RealtimeCaptureStats>,
         onFirstSample: @escaping @MainActor (AudioGraphFormatSnapshot) -> Void,
-        onEvent: @escaping @MainActor (String, String) -> Void
+        onEvent: @escaping @MainActor (String, String) -> Void,
+        onFailure: @escaping @MainActor (CaptureSessionFailureEvent) -> Void
     ) {
         self.targetFormat = targetFormat
         self.outputFile = outputFile
@@ -37,27 +68,45 @@ final class CaptureSessionRecorder {
         self.captureStats = captureStats
         self.onFirstSample = onFirstSample
         self.onEvent = onEvent
-        self.sampleSink = CaptureSessionSampleSink(
-            targetFormat: targetFormat,
-            outputFile: outputFile,
-            isCapturing: isCapturing,
-            framesWritten: framesWritten,
-            droppedFrames: droppedFrames,
-            captureStats: captureStats,
-            onFirstSample: onFirstSample,
-            onEvent: onEvent
-        )
+        self.onFailure = onFailure
+        super.init()
     }
 
-    func start() throws {
-        guard let device = AVCaptureDevice.default(for: .audio) else {
-            throw AudioRecorderError.captureDeviceUnavailable
+    var isRunning: Bool {
+        session.isRunning
+    }
+
+    func start(expectedInputDeviceUID: String, startupTimeoutMs: Int) async throws -> CaptureSessionStartResult {
+        let candidates = CaptureDeviceSelection.availableAudioCaptureCandidates()
+        guard let selection = CaptureDeviceSelection.resolve(expectedInputUID: expectedInputDeviceUID, candidates: candidates),
+              let device = CaptureDeviceSelection.availableAudioCaptureDevices().first(where: { $0.uniqueID == selection.uniqueID }) else {
+            throw AudioRecorderError.captureDeviceSelectionFailed(
+                "No AVCaptureDevice matched active default input uid \(expectedInputDeviceUID). availableCaptureDevices=\(CaptureDeviceSelection.availableSnapshot())"
+            )
+        }
+
+        selectedDeviceUID = selection.uniqueID
+        selectedDeviceName = selection.localizedName
+        hasDeliveredFirstSample = false
+        converter = nil
+        sourceFormatSnapshot = nil
+        captureOutput.audioSettings = nil
+        if #available(macOS 26.0, *), captureOutput.isDeferredStartSupported {
+            captureOutput.isDeferredStartEnabled = false
         }
 
         let input = try AVCaptureDeviceInput(device: device)
+        selectedDeviceInput = input
 
         session.beginConfiguration()
         defer { session.commitConfiguration() }
+
+        for existingInput in session.inputs {
+            session.removeInput(existingInput)
+        }
+        for existingOutput in session.outputs {
+            session.removeOutput(existingOutput)
+        }
 
         if session.canAddInput(input) {
             session.addInput(input)
@@ -71,15 +120,25 @@ final class CaptureSessionRecorder {
             throw AudioRecorderError.captureSessionConfigurationFailed("Failed to add audio output to AVCaptureSession")
         }
 
-        captureOutput.setSampleBufferDelegate(sampleSink, queue: sampleQueue)
+        captureOutput.setSampleBufferDelegate(self, queue: sampleQueue)
+        installObservers(for: device)
+
+        let startupStream = makeStartupStream(timeoutMs: startupTimeoutMs)
 
         sessionQueue.sync {
             self.session.startRunning()
         }
 
         if !session.isRunning {
-            throw AudioRecorderError.captureSessionConfigurationFailed("AVCaptureSession failed to start running")
+            let error = AudioRecorderError.captureSessionConfigurationFailed("AVCaptureSession failed to start running")
+            failStartupIfNeeded(error: error)
         }
+
+        for try await result in startupStream {
+            return result
+        }
+
+        throw AudioRecorderError.captureStartupTimedOut("Timed out waiting for first audio sample from AVCaptureSession")
     }
 
     func stop() {
@@ -89,44 +148,13 @@ final class CaptureSessionRecorder {
                 self.session.stopRunning()
             }
         }
+        removeObservers()
+        selectedDeviceInput = nil
+        failStartupIfNeeded(error: AudioRecorderError.captureSessionConfigurationFailed("Capture session stopped before first sample"))
     }
 
     func forceReset() {
         stop()
-    }
-}
-
-private final class CaptureSessionSampleSink: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate {
-    private let targetFormat: AVAudioFormat
-    private let outputFile: AVAudioFile
-    private let isCapturing: OSAllocatedUnfairLock<Bool>
-    private let framesWritten: OSAllocatedUnfairLock<Int64>
-    private let droppedFrames: OSAllocatedUnfairLock<Int64>
-    private let captureStats: OSAllocatedUnfairLock<RealtimeCaptureStats>
-    private let onFirstSample: @MainActor (AudioGraphFormatSnapshot) -> Void
-    private let onEvent: @MainActor (String, String) -> Void
-
-    private var converter: AVAudioConverter?
-    private var sourceFormatSnapshot: AudioGraphFormatSnapshot?
-
-    init(
-        targetFormat: AVAudioFormat,
-        outputFile: AVAudioFile,
-        isCapturing: OSAllocatedUnfairLock<Bool>,
-        framesWritten: OSAllocatedUnfairLock<Int64>,
-        droppedFrames: OSAllocatedUnfairLock<Int64>,
-        captureStats: OSAllocatedUnfairLock<RealtimeCaptureStats>,
-        onFirstSample: @escaping @MainActor (AudioGraphFormatSnapshot) -> Void,
-        onEvent: @escaping @MainActor (String, String) -> Void
-    ) {
-        self.targetFormat = targetFormat
-        self.outputFile = outputFile
-        self.isCapturing = isCapturing
-        self.framesWritten = framesWritten
-        self.droppedFrames = droppedFrames
-        self.captureStats = captureStats
-        self.onFirstSample = onFirstSample
-        self.onEvent = onEvent
     }
 
     func captureOutput(
@@ -159,13 +187,7 @@ private final class CaptureSessionSampleSink: NSObject, AVCaptureAudioDataOutput
             return
         }
         let sourceFormat = AVAudioFormat(cmAudioFormatDescription: formatDescription)
-
         let formatSnapshot = AudioGraphFormatSnapshot(sourceFormat)
-        if firstSampleSeen {
-            Task { @MainActor in
-                self.onFirstSample(formatSnapshot)
-            }
-        }
 
         if sourceFormatSnapshot != formatSnapshot {
             sourceFormatSnapshot = formatSnapshot
@@ -173,8 +195,26 @@ private final class CaptureSessionSampleSink: NSObject, AVCaptureAudioDataOutput
             Task { @MainActor in
                 self.onEvent(
                     "capture_session_source_format_observed",
-                    "sourceFormat={\(formatSnapshot.description)} targetFormat={\(AudioGraphFormatSnapshot(self.targetFormat).description)}"
+                    "selectedDeviceUID=\(self.selectedDeviceUID) selectedDeviceName=\(self.selectedDeviceName) sourceFormat={\(formatSnapshot.description)} targetFormat={\(AudioGraphFormatSnapshot(self.targetFormat).description)}"
                 )
+            }
+        }
+
+        if firstSampleSeen {
+            hasDeliveredFirstSample = true
+            completeStartupIfNeeded(
+                with: CaptureSessionStartResult(
+                    selectedDeviceUID: selectedDeviceUID,
+                    selectedDeviceName: selectedDeviceName,
+                    firstSampleFormat: formatSnapshot
+                )
+            )
+            Task { @MainActor in
+                self.onEvent(
+                    "capture_session_first_sample",
+                    "selectedDeviceUID=\(self.selectedDeviceUID) selectedDeviceName=\(self.selectedDeviceName) sourceFormat={\(formatSnapshot.description)}"
+                )
+                self.onFirstSample(formatSnapshot)
             }
         }
 
@@ -254,7 +294,164 @@ private final class CaptureSessionSampleSink: NSObject, AVCaptureAudioDataOutput
         droppedFrames.withLock { $0 += 1 }
         captureStats.withLock { $0.buffersDropped += 1 }
         Task { @MainActor in
-            self.onEvent(event, "targetFormat={\(AudioGraphFormatSnapshot(self.targetFormat).description)}")
+            self.onEvent(event, "selectedDeviceUID=\(self.selectedDeviceUID) targetFormat={\(AudioGraphFormatSnapshot(self.targetFormat).description)}")
         }
+    }
+
+    private func installObservers(for device: AVCaptureDevice) {
+        removeObservers()
+
+        runtimeErrorObserver = NotificationCenter.default.addObserver(
+            forName: AVCaptureSession.runtimeErrorNotification,
+            object: session,
+            queue: nil
+        ) { [weak self] notification in
+            self?.handleRuntimeError(notification)
+        }
+
+        sessionInterruptedObserver = NotificationCenter.default.addObserver(
+            forName: AVCaptureSession.wasInterruptedNotification,
+            object: session,
+            queue: nil
+        ) { [weak self] notification in
+            self?.handleSessionInterrupted(notification)
+        }
+
+        sessionInterruptionEndedObserver = NotificationCenter.default.addObserver(
+            forName: AVCaptureSession.interruptionEndedNotification,
+            object: session,
+            queue: nil
+        ) { [weak self] notification in
+            self?.handleSessionInterruptionEnded(notification)
+        }
+
+        deviceDisconnectedObserver = NotificationCenter.default.addObserver(
+            forName: AVCaptureDevice.wasDisconnectedNotification,
+            object: device,
+            queue: nil
+        ) { [weak self] notification in
+            self?.handleDeviceDisconnected(notification)
+        }
+    }
+
+    private func removeObservers() {
+        for observer in [runtimeErrorObserver, sessionInterruptedObserver, sessionInterruptionEndedObserver, deviceDisconnectedObserver] {
+            if let observer {
+                NotificationCenter.default.removeObserver(observer)
+            }
+        }
+        runtimeErrorObserver = nil
+        sessionInterruptedObserver = nil
+        sessionInterruptionEndedObserver = nil
+        deviceDisconnectedObserver = nil
+    }
+
+    private func makeStartupStream(timeoutMs: Int) -> AsyncThrowingStream<CaptureSessionStartResult, Error> {
+        AsyncThrowingStream { continuation in
+            let timeoutTask = Task { [weak self] in
+                try? await Task.sleep(for: .milliseconds(timeoutMs))
+                self?.failStartupIfNeeded(
+                    error: AudioRecorderError.captureStartupTimedOut(
+                        "Timed out after \(timeoutMs)ms waiting for first audio sample from selected device \(self?.selectedDeviceUID ?? "unknown")"
+                    )
+                )
+            }
+
+            startupWaitState.withLock { state in
+                state.continuation = continuation
+                state.timeoutTask = timeoutTask
+                state.completed = false
+            }
+        }
+    }
+
+    private func completeStartupIfNeeded(with result: CaptureSessionStartResult) {
+        let (continuation, timeoutTask) = startupWaitState.withLock { state -> (AsyncThrowingStream<CaptureSessionStartResult, Error>.Continuation?, Task<Void, Never>?) in
+            guard !state.completed else { return (nil, nil) }
+            state.completed = true
+            let continuation = state.continuation
+            let timeoutTask = state.timeoutTask
+            state.continuation = nil
+            state.timeoutTask = nil
+            return (continuation, timeoutTask)
+        }
+
+        timeoutTask?.cancel()
+        continuation?.yield(result)
+        continuation?.finish()
+    }
+
+    private func failStartupIfNeeded(error: Error) {
+        let (continuation, timeoutTask) = startupWaitState.withLock { state -> (AsyncThrowingStream<CaptureSessionStartResult, Error>.Continuation?, Task<Void, Never>?) in
+            guard !state.completed else { return (nil, nil) }
+            state.completed = true
+            let continuation = state.continuation
+            let timeoutTask = state.timeoutTask
+            state.continuation = nil
+            state.timeoutTask = nil
+            return (continuation, timeoutTask)
+        }
+
+        timeoutTask?.cancel()
+        continuation?.finish(throwing: error)
+    }
+
+    private func handleRuntimeError(_ notification: Notification) {
+        let detail = describe(notification: notification)
+        let error = AudioRecorderError.captureSessionRuntimeError(detail)
+        if !hasDeliveredFirstSample {
+            failStartupIfNeeded(error: error)
+            return
+        }
+
+        Task { @MainActor in
+            self.onEvent("capture_session_runtime_error", detail)
+            self.onFailure(CaptureSessionFailureEvent(reason: .captureSessionRuntimeError, detail: detail))
+        }
+    }
+
+    private func handleSessionInterrupted(_ notification: Notification) {
+        let detail = describe(notification: notification)
+        let error = AudioRecorderError.captureSessionRuntimeError(detail)
+        if !hasDeliveredFirstSample {
+            failStartupIfNeeded(error: error)
+            return
+        }
+
+        Task { @MainActor in
+            self.onEvent("capture_session_interrupted", detail)
+            self.onFailure(CaptureSessionFailureEvent(reason: .captureSessionRuntimeError, detail: detail))
+        }
+    }
+
+    private func handleSessionInterruptionEnded(_ notification: Notification) {
+        let detail = describe(notification: notification)
+        Task { @MainActor in
+            self.onEvent("capture_session_interruption_ended", detail)
+        }
+    }
+
+    private func handleDeviceDisconnected(_ notification: Notification) {
+        let detail = describe(notification: notification)
+        let error = AudioRecorderError.captureSessionRuntimeError(detail)
+        if !hasDeliveredFirstSample {
+            failStartupIfNeeded(error: error)
+            return
+        }
+
+        Task { @MainActor in
+            self.onEvent("capture_session_device_disconnected", detail)
+            self.onFailure(CaptureSessionFailureEvent(reason: .captureDeviceDisconnected, detail: detail))
+        }
+    }
+
+    private func describe(notification: Notification) -> String {
+        let userInfo = (notification.userInfo ?? [:])
+            .map { key, value in
+                "\(key)=\(AppDiagnostics.compactText(String(describing: value), limit: 200))"
+            }
+            .sorted()
+            .joined(separator: ",")
+        return "selectedDeviceUID=\(selectedDeviceUID) selectedDeviceName=\(selectedDeviceName) name=\(notification.name.rawValue) userInfo={\(userInfo)}"
     }
 }

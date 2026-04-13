@@ -5,6 +5,10 @@ enum RecordingFailureReason: String {
     case engineStartFailed = "engine_start_failed"
     case inputFormatInvalid = "input_format_invalid"
     case converterCreationFailed = "converter_creation_failed"
+    case captureDeviceSelectionFailed = "capture_device_selection_failed"
+    case captureSessionRuntimeError = "capture_session_runtime_error"
+    case captureDeviceDisconnected = "capture_device_disconnected"
+    case captureInputDeviceChanged = "capture_input_device_changed"
     case noAudioWatchdogTimeout = "no_audio_watchdog_timeout"
     case captureStalled = "capture_stalled"
     case routeChangedDuringStart = "route_changed_during_start"
@@ -18,11 +22,11 @@ enum RecordingFailureReason: String {
     var reasonCategory: String {
         switch self {
         case .engineConfigurationChangedEngineStopped, .engineStartFailed,
-             .inputFormatInvalid, .converterCreationFailed:
+             .inputFormatInvalid, .converterCreationFailed, .captureDeviceSelectionFailed:
             return "engine"
-        case .noAudioWatchdogTimeout, .captureStalled:
+        case .noAudioWatchdogTimeout, .captureStalled, .captureSessionRuntimeError:
             return "capture"
-        case .routeChangedDuringStart, .bluetoothHFPRenegotiation:
+        case .routeChangedDuringStart, .bluetoothHFPRenegotiation, .captureDeviceDisconnected, .captureInputDeviceChanged:
             return "route"
         case .retryBudgetExhausted, .duplicateFailureWhileRecoveryPending, .manualStopDuringRecovery:
             return "recovery"
@@ -35,7 +39,8 @@ enum RecordingFailureReason: String {
 
     var isBluetoothRelated: Bool {
         switch self {
-        case .engineConfigurationChangedEngineStopped, .routeChangedDuringStart, .bluetoothHFPRenegotiation:
+        case .engineConfigurationChangedEngineStopped, .routeChangedDuringStart, .bluetoothHFPRenegotiation,
+             .captureDeviceDisconnected, .captureInputDeviceChanged:
             return true
         default:
             return false
@@ -45,9 +50,10 @@ enum RecordingFailureReason: String {
     var isRecoverable: Bool {
         switch self {
         case .engineConfigurationChangedEngineStopped, .routeChangedDuringStart, .bluetoothHFPRenegotiation,
-             .noAudioWatchdogTimeout, .captureStalled:
+             .noAudioWatchdogTimeout, .captureStalled, .captureSessionRuntimeError,
+             .captureDeviceDisconnected, .captureInputDeviceChanged:
             return true
-        case .engineStartFailed, .inputFormatInvalid, .converterCreationFailed,
+        case .engineStartFailed, .inputFormatInvalid, .converterCreationFailed, .captureDeviceSelectionFailed,
              .retryBudgetExhausted, .duplicateFailureWhileRecoveryPending,
              .manualStopDuringRecovery, .microphonePermissionUnavailable, .unknown:
             return false
@@ -73,6 +79,14 @@ enum RecordingFailureReason: String {
             return "Input format is not ready yet."
         case .converterCreationFailed:
             return "Failed to create audio converter."
+        case .captureDeviceSelectionFailed:
+            return "Failed to open the selected microphone."
+        case .captureSessionRuntimeError:
+            return "Audio capture failed."
+        case .captureDeviceDisconnected:
+            return "Microphone disconnected. Reconnecting..."
+        case .captureInputDeviceChanged:
+            return "Input device changed. Reconnecting..."
         case .noAudioWatchdogTimeout:
             return "No audio captured after 5 seconds. Check your microphone or try reconnecting your headphones."
         case .captureStalled:
@@ -94,13 +108,17 @@ enum RecordingFailureReason: String {
         switch self {
         case .engineConfigurationChangedEngineStopped, .bluetoothHFPRenegotiation, .retryBudgetExhausted:
             return "reconnect_headphones"
+        case .captureDeviceDisconnected, .captureInputDeviceChanged:
+            return "inspect_active_microphone_route"
         case .routeChangedDuringStart:
             return "wait_for_bluetooth_route_to_stabilize"
         case .noAudioWatchdogTimeout, .captureStalled:
             return "switch_to_built_in_mic"
+        case .captureSessionRuntimeError:
+            return "report_bug_with_log_bundle"
         case .microphonePermissionUnavailable:
             return "inspect_permissions"
-        case .engineStartFailed, .inputFormatInvalid, .converterCreationFailed, .unknown:
+        case .engineStartFailed, .inputFormatInvalid, .converterCreationFailed, .captureDeviceSelectionFailed, .unknown:
             return "report_bug_with_log_bundle"
         case .duplicateFailureWhileRecoveryPending, .manualStopDuringRecovery:
             return "wait_for_current_recovery_cycle"
@@ -113,6 +131,16 @@ enum RecordingFailureReason: String {
             return .inputFormatInvalid
         case AudioRecorderError.converterCreationFailed:
             return .converterCreationFailed
+        case AudioRecorderError.captureDeviceUnavailable:
+            return .captureDeviceSelectionFailed
+        case AudioRecorderError.captureDeviceSelectionFailed(_):
+            return .captureDeviceSelectionFailed
+        case AudioRecorderError.captureSessionConfigurationFailed(_):
+            return .captureSessionRuntimeError
+        case AudioRecorderError.captureSessionRuntimeError(_):
+            return .captureSessionRuntimeError
+        case AudioRecorderError.captureStartupTimedOut(_):
+            return .captureSessionRuntimeError
         default:
             return .engineStartFailed
         }
@@ -455,6 +483,15 @@ final class RecordingDiagnostics {
     func noteEngineStarted() {
         engineStartUptime = ProcessInfo.processInfo.systemUptime
         recordRecorderEvent("engine_start_succeeded", detail: "context={\(contextSnapshot())}")
+    }
+
+    func noteCaptureStartRequested() {
+        recordRecorderEvent("capture_start_requested", detail: "context={\(contextSnapshot())}")
+    }
+
+    func noteCaptureStarted() {
+        engineStartUptime = ProcessInfo.processInfo.systemUptime
+        recordRecorderEvent("capture_start_succeeded", detail: "context={\(contextSnapshot())}")
     }
 
     func noteAttemptEnded(framesWritten: Int64, captureSnapshot: CaptureCadenceSnapshot, detail: String) {
