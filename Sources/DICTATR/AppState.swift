@@ -126,6 +126,15 @@ final class AppState {
             )
         }
     }
+    var microphonePermissionStatus: MicrophoneAuthorizationState = MicrophonePermissionManager.authorizationState() {
+        didSet {
+            logObservableChange(
+                name: "microphonePermissionStatus",
+                oldValue: oldValue.rawValue,
+                newValue: microphonePermissionStatus.rawValue
+            )
+        }
+    }
 
     let audioRecorder = AudioRecorder()
     let transcriptionEngine = TranscriptionEngine()
@@ -136,6 +145,7 @@ final class AppState {
     private var modelLoadTask: Task<Void, Never>?
     private var transcriptionTask: Task<Void, Never>?
     private var autoRetryTask: Task<Void, Never>?
+    private var recordingStartTask: Task<Void, Never>?
     private var autoRetryCount = 0
     /// True while a reconnect retry is scheduled or sleeping. Prevents an HFP "storm"
     /// (many `onRecordingFailed` callbacks in one burst) from burning the whole retry budget.
@@ -158,6 +168,7 @@ final class AppState {
     var configuredModelVariant: String { transcriptionEngine.configuredModelVariant }
     var configuredModelPolicySummary: String { transcriptionEngine.configuredModelPolicySummary }
     var canHardResetAudio: Bool { currentState != .transcribing }
+    var shouldShowOnboarding: Bool { !hasCompletedOnboarding || !microphonePermissionStatus.isAuthorized }
 
     private func logObservableChange(name: String, oldValue: String, newValue: String) {
         guard oldValue != newValue else { return }
@@ -175,6 +186,7 @@ final class AppState {
             "lastTranscriptionChars=\(lastTranscription?.count ?? 0)",
             "isModelLoaded=\(AppDiagnostics.boolLabel(transcriptionEngine.isModelLoaded))",
             "isModelLoading=\(AppDiagnostics.boolLabel(transcriptionEngine.isLoading))",
+            "microphoneStatus=\(microphonePermissionStatus.rawValue)",
             "autoPasteEnabled=\(AppDiagnostics.boolLabel(autoPasteEnabled))",
             "retentionCount=\(retentionCount)",
             "retryCount=\(autoRetryCount)",
@@ -214,6 +226,8 @@ final class AppState {
             "AppState audio snapshot route=\(AudioDeviceDiagnostics.currentRouteSnapshot()) devices=\(AudioDeviceDiagnostics.availableDevicesSnapshot())"
         )
 
+        refreshPermissionStates()
+
         // Wire up auto-stop callback from AudioRecorder (watchdog timeout, engine failure)
         audioRecorder.onRecordingFailed = { [weak self] message in
             self?.handleRecordingFailure(message: message)
@@ -233,6 +247,16 @@ final class AppState {
             }
         }
 
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.refreshPermissionStates()
+            }
+        }
+
         // Register hotkey — dispatch to MainActor since callback thread is unspecified
         hotkeyManager = HotkeyManager { [weak self] in
             Task { @MainActor in
@@ -246,13 +270,53 @@ final class AppState {
         httpServer = LocalHTTPServer { [weak self] url in
             guard let self else { throw TranscriptionError.modelNotLoaded }
             let engine = try await self.httpTranscriptionEngine()
-            return try await engine.transcribe(audioURL: url)
+            let output = try await engine.transcribe(audioURL: url)
+            return output.text
         }
         httpServer?.start()
 
         // Start model download immediately so it's ready when user opens the menu.
         // If already cached, this completes in seconds.
         startModelDownload()
+    }
+
+    func refreshPermissionStates() {
+        microphonePermissionStatus = MicrophonePermissionManager.authorizationState()
+    }
+
+    func handleMicrophonePermissionAction(source: String) async {
+        refreshPermissionStates()
+        switch microphonePermissionStatus {
+        case .authorized:
+            AppDiagnostics.info(.appState, "Microphone permission already authorized source=\(source)")
+            errorMessage = nil
+        case .notDetermined:
+            AppDiagnostics.info(.appState, "Requesting microphone permission source=\(source)")
+            statusMessage = "Requesting microphone access..."
+            let granted = await MicrophonePermissionManager.requestAccess()
+            refreshPermissionStates()
+            if granted {
+                AppDiagnostics.info(.appState, "Microphone permission granted source=\(source)")
+                if currentState == .idle, !isModelLoading {
+                    statusMessage = "Ready"
+                }
+                errorMessage = nil
+            } else {
+                AppDiagnostics.warning(.appState, "Microphone permission denied at prompt source=\(source)")
+                statusMessage = "Microphone access required"
+                errorMessage = "Settings → search \"Privacy\" → Microphone → toggle DICTATR on"
+            }
+        case .denied, .restricted:
+            AppDiagnostics.warning(
+                .appState,
+                "Opening microphone settings source=\(source) status=\(microphonePermissionStatus.rawValue)"
+            )
+            statusMessage = "Microphone access required"
+            errorMessage = microphonePermissionStatus == .restricted
+                ? "Microphone access is restricted by macOS or device policy."
+                : "Settings → search \"Privacy\" → Microphone → toggle DICTATR on"
+            MicrophonePermissionManager.openSettings()
+        }
     }
 
     func startModelDownload() {
@@ -302,6 +366,8 @@ final class AppState {
             "hardResetAudioContention requested currentState=\(String(describing: currentState)) retryCount=\(autoRetryCount) recoveryPending=\(recordingRecoveryPending) route=\(AudioDeviceDiagnostics.currentRouteSnapshot())"
         )
 
+        recordingStartTask?.cancel()
+        recordingStartTask = nil
         autoRetryTask?.cancel()
         autoRetryTask = nil
         recordingRecoveryPending = false
@@ -350,6 +416,12 @@ final class AppState {
         )
         switch currentState {
         case .idle:
+            if recordingStartTask != nil {
+                statusMessage = "Requesting microphone access..."
+                errorMessage = "Recording start is already in progress. Please wait."
+                AppDiagnostics.warning(.appState, "toggleRecording ignored because recording start is already in progress")
+                return
+            }
             if recordingRecoveryPending {
                 statusMessage = "Reconnecting..."
                 errorMessage = "Microphone recovery is already in progress. Please wait."
@@ -362,7 +434,11 @@ final class AppState {
             autoRetryCount = 0
             recordingRecoveryPending = false
             autoRetryTask?.cancel()
-            startRecording()
+            recordingStartTask = Task { @MainActor [weak self] in
+                guard let self else { return }
+                defer { self.recordingStartTask = nil }
+                await self.startRecording()
+            }
         case .recording:
             stopRecordingAndTranscribe()
         case .transcribing:
@@ -371,7 +447,36 @@ final class AppState {
         }
     }
 
-    private func startRecording() {
+    private func startRecording() async {
+        refreshPermissionStates()
+        switch microphonePermissionStatus {
+        case .authorized:
+            break
+        case .notDetermined:
+            AppDiagnostics.info(.appState, "startRecording requesting microphone permission before capture")
+            statusMessage = "Requesting microphone access..."
+            errorMessage = nil
+            let granted = await MicrophonePermissionManager.requestAccess()
+            refreshPermissionStates()
+            guard !Task.isCancelled else { return }
+            guard granted, microphonePermissionStatus.isAuthorized else {
+                statusMessage = "Microphone access required"
+                errorMessage = "Settings → search \"Privacy\" → Microphone → toggle DICTATR on"
+                AppDiagnostics.warning(.appState, "startRecording blocked because microphone permission was not granted")
+                return
+            }
+        case .denied, .restricted:
+            statusMessage = "Microphone access required"
+            errorMessage = microphonePermissionStatus == .restricted
+                ? "Microphone access is restricted by macOS or device policy."
+                : "Settings → search \"Privacy\" → Microphone → toggle DICTATR on"
+            AppDiagnostics.warning(
+                .appState,
+                "startRecording blocked because microphone access is unavailable status=\(microphonePermissionStatus.rawValue)"
+            )
+            return
+        }
+
         guard transcriptionEngine.isModelLoaded else {
             if !transcriptionEngine.isLoading {
                 AppDiagnostics.info(.appState, "startRecording triggered model load because model is not ready")
@@ -484,6 +589,20 @@ final class AppState {
 
     private func retryStartRecording() {
         guard transcriptionEngine.isModelLoaded else { return }
+        refreshPermissionStates()
+        guard microphonePermissionStatus.isAuthorized else {
+            currentState = .idle
+            statusMessage = "Microphone access required"
+            errorMessage = microphonePermissionStatus == .restricted
+                ? "Microphone access is restricted by macOS or device policy."
+                : "Settings → search \"Privacy\" → Microphone → toggle DICTATR on"
+            recordingIndicator.hide()
+            AppDiagnostics.warning(
+                .appState,
+                "retryStartRecording blocked because microphone access is unavailable status=\(microphonePermissionStatus.rawValue)"
+            )
+            return
+        }
         AppDiagnostics.info(
             .appState,
             "retryStartRecording retryCount=\(autoRetryCount) snapshot={\(stateSnapshot())} devices=\(AudioDeviceDiagnostics.availableDevicesSnapshot())"
@@ -540,7 +659,8 @@ final class AppState {
             "recording stopped session=\(sessionID) duration=\(String(format: "%.3f", result.duration))s frames=\(result.framesWritten) file=\(result.url.lastPathComponent) snapshot={\(stateSnapshot())}"
         )
 
-        if let signalStats = Self.analyzeAudioSignal(at: result.url) {
+        let signalStats = Self.analyzeAudioSignal(at: result.url)
+        if let signalStats {
             AppDiagnostics.info(
                 .appState,
                 "recording signal session=\(sessionID) rms=\(String(format: "%.6f", signalStats.rms)) peak=\(String(format: "%.6f", signalStats.peak)) samples=\(signalStats.sampleCount)"
@@ -592,10 +712,10 @@ final class AppState {
                     try? FileManager.default.removeItem(at: result.url)
                     return
                 }
-                let text = try await self.transcriptionEngine.transcribe(audioURL: result.url)
+                let transcription = try await self.transcriptionEngine.transcribe(audioURL: result.url)
                 AppDiagnostics.info(
                     .appState,
-                    "transcription returned session=\(sessionID) duration=\(String(format: "%.3f", result.duration))s chars=\(text.count) text=\(AppDiagnostics.quoted(text, limit: 1200)) file=\(result.url.lastPathComponent) snapshot={\(self.stateSnapshot())}"
+                    "transcription returned session=\(sessionID) duration=\(String(format: "%.3f", result.duration))s chars=\(transcription.text.count) text=\(AppDiagnostics.quoted(transcription.text, limit: 1200)) rawText=\(AppDiagnostics.quoted(transcription.rawText, limit: 1200)) file=\(result.url.lastPathComponent) snapshot={\(self.stateSnapshot())}"
                 )
 
                 guard !Task.isCancelled else {
@@ -603,9 +723,9 @@ final class AppState {
                     return
                 }
 
-                if text.isEmpty {
+                if transcription.text.isEmpty {
                     let emptyMessage =
-                        "transcription returned empty text session=\(sessionID) duration=\(String(format: "%.3f", result.duration))s chars=0 text=\(AppDiagnostics.quoted(text, limit: 1200)) file=\(result.url.lastPathComponent) snapshot={\(self.stateSnapshot())}"
+                        "transcription returned empty text session=\(sessionID) duration=\(String(format: "%.3f", result.duration))s chars=0 text=\(AppDiagnostics.quoted(transcription.text, limit: 1200)) rawText=\(AppDiagnostics.quoted(transcription.rawText, limit: 1200)) file=\(result.url.lastPathComponent) snapshot={\(self.stateSnapshot())}"
 
                     if result.duration >= 5.0 {
                         AppDiagnostics.error(.appState, emptyMessage)
@@ -613,7 +733,16 @@ final class AppState {
                         AppDiagnostics.info(.appState, emptyMessage)
                     }
                     self.recordingIndicator.hide()
-                    self.statusMessage = "No speech detected"
+                    if Self.shouldTreatAsCaptureFailure(
+                        duration: result.duration,
+                        signalStats: signalStats,
+                        containsOnlyPlaceholderTokens: transcription.containsOnlyPlaceholderTokens
+                    ) {
+                        self.statusMessage = "Microphone capture failed"
+                        self.errorMessage = "DICTATR recorded silence. Check System Settings → Privacy & Security → Microphone and confirm DICTATR is allowed to record."
+                    } else {
+                        self.statusMessage = "No speech detected"
+                    }
                     self.currentState = .idle
                     try? FileManager.default.removeItem(at: result.url)
                     return
@@ -621,12 +750,12 @@ final class AppState {
 
                 AppDiagnostics.info(
                     .appState,
-                    "transcription complete session=\(sessionID) duration=\(String(format: "%.3f", result.duration))s chars=\(text.count) text=\(AppDiagnostics.quoted(text, limit: 1200)) snapshot={\(self.stateSnapshot())}"
+                    "transcription complete session=\(sessionID) duration=\(String(format: "%.3f", result.duration))s chars=\(transcription.text.count) text=\(AppDiagnostics.quoted(transcription.text, limit: 1200)) rawText=\(AppDiagnostics.quoted(transcription.rawText, limit: 1200)) snapshot={\(self.stateSnapshot())}"
                 )
-                self.lastTranscription = text
+                self.lastTranscription = transcription.text
 
                 // Paste to active app
-                let pasteResult = await PasteManager.paste(text: text, autoPaste: self.autoPasteEnabled)
+                let pasteResult = await PasteManager.paste(text: transcription.text, autoPaste: self.autoPasteEnabled)
                 AppDiagnostics.info(
                     .appState,
                     "paste result session=\(sessionID) result=\(String(describing: pasteResult)) snapshot={\(self.stateSnapshot())}"
@@ -640,7 +769,7 @@ final class AppState {
                 if let db = self.databaseManager {
                     do {
                         var record = DictationRecord(
-                            text: text,
+                            text: transcription.text,
                             duration: result.duration,
                             audioFilePath: nil,
                             createdAt: Date()
@@ -701,6 +830,20 @@ extension UserDefaults {
 }
 
 private extension AppState {
+    static func shouldTreatAsCaptureFailure(
+        duration: TimeInterval,
+        signalStats: (rms: Float, peak: Float, sampleCount: Int)?,
+        containsOnlyPlaceholderTokens: Bool
+    ) -> Bool {
+        let hasZeroSignal = signalStats.map { $0.sampleCount > 0 && $0.rms <= 0.000_001 && $0.peak <= 0.000_001 } ?? false
+
+        if containsOnlyPlaceholderTokens && duration >= 5.0 {
+            return true
+        }
+
+        return hasZeroSignal && duration >= 1.0
+    }
+
     static func analyzeAudioSignal(at url: URL) -> (rms: Float, peak: Float, sampleCount: Int)? {
         guard let file = try? AVAudioFile(forReading: url) else { return nil }
         let frameCount = AVAudioFrameCount(file.length)

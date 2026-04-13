@@ -33,6 +33,12 @@ import WhisperKit
 @Observable
 @MainActor
 final class TranscriptionEngine {
+    struct TranscriptionOutput: Sendable {
+        let rawText: String
+        let text: String
+        let containsOnlyPlaceholderTokens: Bool
+    }
+
     private struct ModelSelection {
         let variant: String
         let whisperKitDefault: String
@@ -220,7 +226,7 @@ final class TranscriptionEngine {
         }
     }
 
-    func transcribe(audioURL: URL) async throws -> String {
+    func transcribe(audioURL: URL) async throws -> TranscriptionOutput {
         guard let pipe = whisperKit else {
             throw TranscriptionError.modelNotLoaded
         }
@@ -257,13 +263,18 @@ final class TranscriptionEngine {
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
         let normalized = Self.normalizeTranscription(text)
+        let placeholderOnly = Self.containsOnlyPlaceholderTokens(in: text)
 
         AppDiagnostics.info(
             .transcriptionEngine,
             "transcribe raw segmentCount=\(results.count) rawText=\(Self.logQuoted(AppDiagnostics.compactText(text, limit: 1200))) normalizedText=\(Self.logQuoted(AppDiagnostics.compactText(normalized, limit: 1200))) \(segmentSummaries)"
         )
 
-        return normalized
+        return TranscriptionOutput(
+            rawText: text,
+            text: normalized,
+            containsOnlyPlaceholderTokens: placeholderOnly
+        )
     }
 
     private static func normalizeTranscription(_ text: String) -> String {
@@ -286,6 +297,26 @@ final class TranscriptionEngine {
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
         return cleaned
+    }
+
+    private static func containsOnlyPlaceholderTokens(in text: String) -> Bool {
+        let tokens = text
+            .split(whereSeparator: \.isWhitespace)
+            .map { $0.uppercased() }
+
+        guard !tokens.isEmpty else { return false }
+
+        let placeholderTokens: Set<String> = [
+            "[BLANK_AUDIO]",
+            "[BLANK AUDIO]",
+            "[NO_AUDIO]",
+            "[NO AUDIO]",
+            "[SILENCE]",
+            "[MUSIC]",
+            "[NOISE]"
+        ]
+
+        return tokens.allSatisfy { placeholderTokens.contains($0) }
     }
 
     private static func logQuoted(_ text: String) -> String {

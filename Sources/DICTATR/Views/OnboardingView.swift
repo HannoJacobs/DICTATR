@@ -1,3 +1,4 @@
+import AppKit
 import AVFoundation
 import SwiftUI
 
@@ -5,7 +6,6 @@ struct OnboardingView: View {
     @Environment(AppState.self) private var appState
     @State private var microphoneGranted = false
     @State private var accessibilityGranted = false
-    @State private var currentStep = 0
     @State private var accessibilityPollTask: Task<Void, Never>?
 
     var body: some View {
@@ -64,6 +64,9 @@ struct OnboardingView: View {
         .onAppear {
             checkPermissions()
         }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            checkPermissions()
+        }
         .onDisappear {
             accessibilityPollTask?.cancel()
             accessibilityPollTask = nil
@@ -105,23 +108,17 @@ struct OnboardingView: View {
     }
 
     private func checkPermissions() {
-        // Check microphone
-        switch AVCaptureDevice.authorizationStatus(for: .audio) {
-        case .authorized:
-            microphoneGranted = true
-        default:
-            microphoneGranted = false
-        }
+        appState.refreshPermissionStates()
+        microphoneGranted = MicrophonePermissionManager.authorizationState().isAuthorized
 
         // Check accessibility
         accessibilityGranted = PasteManager.checkAccessibilityPermission()
     }
 
     private func requestMicrophoneAccess() {
-        AVCaptureDevice.requestAccess(for: .audio) { granted in
-            Task { @MainActor in
-                microphoneGranted = granted
-            }
+        Task { @MainActor in
+            await appState.handleMicrophonePermissionAction(source: "onboarding")
+            checkPermissions()
         }
     }
 

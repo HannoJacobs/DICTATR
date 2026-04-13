@@ -8,7 +8,7 @@ final class DICTATRAppDelegate: NSObject, NSApplicationDelegate {
         )
         AppDiagnostics.info(
             .lifecycle,
-            "applicationDidFinishLaunching \(AppDiagnostics.runtimeSummary) accessibilityTrusted=\(PasteManager.accessibilityStatusSummary()) route=\(AudioDeviceDiagnostics.currentRouteSnapshot()) devices=\(AudioDeviceDiagnostics.availableDevicesSnapshot())"
+            "applicationDidFinishLaunching \(AppDiagnostics.runtimeSummary) accessibilityTrusted=\(PasteManager.accessibilityStatusSummary()) microphoneStatus=\(MicrophonePermissionManager.authorizationStatusSummary()) route=\(AudioDeviceDiagnostics.currentRouteSnapshot()) devices=\(AudioDeviceDiagnostics.availableDevicesSnapshot())"
         )
     }
 

@@ -1,5 +1,22 @@
 # Changelog
 
+Changelog policy:
+- Every shipped version entry must be written as a detailed operator-facing record, not a terse marketing summary.
+- The current release entry is required to be very verbose: the release pipeline now fails if the section for the bundled app version has fewer than 8 bullet points or fewer than 1200 characters.
+- Each new entry should explain the user-visible problem, the technical root cause, the code-path changes, the release/signing or operational changes when relevant, and the concrete verification outcome.
+
+## 1.28
+- Fixed the installed-build dictation regression introduced by the archive-based release flow on April 13, 2026, where `/Applications/DICTATR.app` could still start, show the normal menu state, and record a WAV file full of frames, but the actual captured waveform was silent because the installed ad-hoc build had lost the microphone entitlement during packaging.
+- Corrected the release signing pipeline so ad-hoc builds now embed `com.apple.security.device.audio-input=true` and no longer enable hardened runtime accidentally, while Developer ID builds still keep the hardened-runtime requirement. This directly fixes the TCC failure mode where macOS refused to prompt for microphone access because the signed app did not qualify for `kTCCServiceMicrophone`.
+- Added a checked-in app entitlements file and made release verification print the embedded entitlements for both the archived bundle and the installed `/Applications/DICTATR.app`. The release scripts now fail immediately if the shipped app is missing the microphone entitlement or if ad-hoc mode accidentally carries a runtime flag again.
+- Tightened release verification so the packaged build is no longer treated as correct just because `codesign --verify` passes. DICTATR now validates bundle identity, signing mode, hardened-runtime expectations, embedded microphone entitlement state, designated requirement shape, `spctl` expectations, and live launch-log evidence from the installed app.
+- Centralized microphone permission handling into one shared code path used by launch, onboarding, the menu-bar UI, and the recording start path. This removes the previous behavior where onboarding state could claim setup was complete even though a newly installed signed app still needed a fresh microphone grant.
+- Changed the recording gate so DICTATR will not begin capture when microphone access is denied or restricted, and it now requests access up front when the state is `notDetermined`. The app reports an explicit microphone-permission problem instead of falling through into a recording session that looks successful in timing terms but produces silent audio and empty dictation.
+- Added visible microphone status to the menu, alongside the existing Accessibility row, so a broken installed build is diagnosable from the app itself. The menu and onboarding now both route the user to the correct microphone permission flow or to System Settings when the app needs repair.
+- Preserved raw Whisper placeholder-token logging for forensics, but changed the user-facing behavior so placeholder-only output and long silent captures are treated as microphone/capture failures instead of ordinary “No speech detected.” This keeps the diagnostic evidence while removing the misleading symptom where the dictated text simply appears to vanish.
+- Verified the shipped fix on the live installed app, not just in the development build. The installed `1.28` app launched from `/Applications/DICTATR.app`, requested microphone permission successfully, transitioned to `microphoneStatus=authorized`, recorded non-zero waveform data, produced real transcription output, and pasted that transcription back into the active app.
+- Verified the TCC behavior change directly in system logs. The old `tccd` failure stating that DICTATR was missing `com.apple.security.device.audio-input` is gone for the new installed build, and macOS now emits the expected microphone prompt and grant path instead of policy-denied silent capture.
+
 ## 1.27
 - Promoted long blank dictations to explicit errors so any recording that runs for at least 5 seconds and still normalizes to empty text is treated as a real failure in the diagnostics log.
 - Added recording duration to the app-state transcription return/completion logs, along with the full normalized dictated text payload, so blank-output incidents can be correlated directly with how long the user was speaking.

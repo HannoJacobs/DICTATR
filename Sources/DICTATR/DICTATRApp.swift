@@ -7,7 +7,7 @@ struct DICTATRApp: App {
 
     var body: some Scene {
         MenuBarExtra("DICTATR", systemImage: appState.menuBarIcon) {
-            if !appState.hasCompletedOnboarding {
+            if appState.shouldShowOnboarding {
                 OnboardingView()
                     .environment(appState)
             } else {

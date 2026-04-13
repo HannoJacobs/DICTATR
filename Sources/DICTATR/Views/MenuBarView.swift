@@ -190,6 +190,16 @@ struct MenuBarView: View {
             Divider()
 
             menuRow(
+                microphoneStatusTitle,
+                icon: microphoneStatusIcon
+            ) {
+                Task { @MainActor in
+                    await appState.handleMicrophonePermissionAction(source: "menu")
+                }
+            }
+            .foregroundStyle(microphoneStatusColor)
+
+            menuRow(
                 PasteManager.checkAccessibilityPermission() ? "Accessibility: Granted" : "Grant Accessibility",
                 icon: PasteManager.checkAccessibilityPermission() ? "checkmark.circle.fill" : "lock.shield"
             ) {
@@ -264,5 +274,38 @@ struct MenuBarView: View {
         if progress < 0.6 { return .green }
         if progress < 0.8 { return .orange }
         return .red
+    }
+
+    private var microphoneStatusTitle: String {
+        switch appState.microphonePermissionStatus {
+        case .authorized:
+            return "Microphone: Granted"
+        case .restricted:
+            return "Microphone: Restricted"
+        case .notDetermined, .denied:
+            return "Grant Microphone"
+        }
+    }
+
+    private var microphoneStatusIcon: String {
+        switch appState.microphonePermissionStatus {
+        case .authorized:
+            return "checkmark.circle.fill"
+        case .restricted:
+            return "exclamationmark.shield"
+        case .notDetermined, .denied:
+            return "mic.badge.plus"
+        }
+    }
+
+    private var microphoneStatusColor: Color {
+        switch appState.microphonePermissionStatus {
+        case .authorized:
+            return .green
+        case .restricted:
+            return .orange
+        case .notDetermined, .denied:
+            return .primary
+        }
     }
 }
