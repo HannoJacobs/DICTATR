@@ -10,6 +10,7 @@ require_command ditto
 require_command open
 require_command pgrep
 require_command pkill
+require_command readlink
 require_command rg
 require_command stat
 require_command tccutil
@@ -39,11 +40,11 @@ verify_signed_app "$INSTALLED_APP_PATH"
 expected_version="$(app_version)"
 expected_build="$(app_build)"
 previous_log_mtime=0
-previous_launch_count=0
+previous_log_target=""
 
 if [ -e "$LATEST_LOG_PATH" ]; then
     previous_log_mtime="$(stat -f '%m' "$LATEST_LOG_PATH")"
-    previous_launch_count="$(rg -c "applicationDidFinishLaunching " "$LATEST_LOG_PATH" || true)"
+    previous_log_target="$(readlink "$LATEST_LOG_PATH" || true)"
 fi
 
 note "Launching installed app"
@@ -53,9 +54,9 @@ launch_verified=0
 for _ in {1..30}; do
     if [ -e "$LATEST_LOG_PATH" ]; then
         current_log_mtime="$(stat -f '%m' "$LATEST_LOG_PATH")"
-        current_launch_count="$(rg -c "applicationDidFinishLaunching " "$LATEST_LOG_PATH" || true)"
+        current_log_target="$(readlink "$LATEST_LOG_PATH" || true)"
         if [ "$current_log_mtime" -gt "$previous_log_mtime" ] && \
-           [ "$current_launch_count" -gt "$previous_launch_count" ] && \
+           [ "$current_log_target" != "$previous_log_target" ] && \
            rg -q "applicationDidFinishLaunching .*version=$expected_version .*build=$expected_build .*bundlePath=$INSTALLED_APP_PATH" "$LATEST_LOG_PATH"; then
             launch_verified=1
             break
