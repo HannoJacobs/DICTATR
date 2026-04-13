@@ -375,7 +375,7 @@ final class AppState {
         switch currentState {
         case .idle:
             if recordingStartTask != nil {
-                statusMessage = "Requesting microphone access..."
+                statusMessage = microphonePermissionStatus == .notDetermined ? "Requesting microphone access..." : "Starting recording..."
                 errorMessage = "Recording start is already in progress. Please wait."
                 AppDiagnostics.warning(.appState, "toggleRecording ignored because recording start is already in progress")
                 return
@@ -455,6 +455,8 @@ final class AppState {
             return
         }
 
+        statusMessage = "Starting recording..."
+        errorMessage = nil
         AppDiagnostics.info(
             .appState,
             "startRecording requested context={\(RecordingDiagnostics.shared.contextSnapshot(extra: ["cause": "user_hotkey"]))} retryCount=\(autoRetryCount) snapshot={\(stateSnapshot())} devices=\(AudioDeviceDiagnostics.availableDevicesSnapshot())"
@@ -468,7 +470,7 @@ final class AppState {
             recordingIndicator.show(audioRecorder: audioRecorder)
             AppDiagnostics.info(
                 .appState,
-                "recording started context={\(RecordingDiagnostics.shared.contextSnapshot(extra: ["cause": "user_hotkey"]))} session=\(audioRecorder.recordingSessionID ?? "none") file=\(url.lastPathComponent) snapshot={\(stateSnapshot())}"
+                "recording started \(AppDiagnostics.recordingVersionSummary) context={\(RecordingDiagnostics.shared.contextSnapshot(extra: ["cause": "user_hotkey"]))} session=\(audioRecorder.recordingSessionID ?? "none") file=\(url.lastPathComponent) snapshot={\(stateSnapshot())}"
             )
         } catch {
             currentState = .idle

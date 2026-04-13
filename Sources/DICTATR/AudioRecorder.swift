@@ -141,7 +141,7 @@ final class AudioRecorder {
 
         AppDiagnostics.info(
             .audioRecorder,
-            "recording start requested context={\(RecordingDiagnostics.shared.contextSnapshot(extra: ["trigger": metadata.trigger, "retryAttempt": String(metadata.retryAttempt), "attempt": attemptContext.attemptID, "engineID": attemptContext.engineInstanceID, "backend": activeBackendKind.rawValue]))} outputFile=\(fileURL.lastPathComponent) routeFingerprint=\(startRouteState.fingerprint) activeInput={\(startRouteState.defaultInput.snapshot)} activeOutput={\(startRouteState.defaultOutput.snapshot)} route=\(startRouteState.routeSnapshot) devices=\(AudioDeviceDiagnostics.availableDevicesSnapshot())"
+            "recording start requested \(AppDiagnostics.recordingVersionSummary) context={\(RecordingDiagnostics.shared.contextSnapshot(extra: ["trigger": metadata.trigger, "retryAttempt": String(metadata.retryAttempt), "attempt": attemptContext.attemptID, "engineID": attemptContext.engineInstanceID, "backend": activeBackendKind.rawValue]))} outputFile=\(fileURL.lastPathComponent) routeFingerprint=\(startRouteState.fingerprint) activeInput={\(startRouteState.defaultInput.snapshot)} activeOutput={\(startRouteState.defaultOutput.snapshot)} route=\(startRouteState.routeSnapshot) devices=\(AudioDeviceDiagnostics.availableDevicesSnapshot())"
         )
         RecordingDiagnostics.shared.recordRecorderEvent(
             "recording_backend_selected",
@@ -219,7 +219,8 @@ final class AudioRecorder {
         let prestartDecision = RecordingStartupGate.tapInstallDecision(
             routeInvolvesBluetooth: startRouteState.activeRouteInvolvesBluetooth,
             inputFormat: prestartFormats.inputSnapshot,
-            outputFormat: prestartFormats.outputSnapshot
+            outputFormat: prestartFormats.outputSnapshot,
+            expectedInputSampleRate: Double(startRouteState.defaultInput.nominalHz)
         )
         if !prestartDecision.shouldInstallTap {
             RecordingDiagnostics.shared.recordRecorderEvent(
@@ -472,7 +473,8 @@ final class AudioRecorder {
         return RecordingStartupGate.tapInstallDecision(
             routeInvolvesBluetooth: AudioDeviceDiagnostics.currentRouteState().activeRouteInvolvesBluetooth,
             inputFormat: formats.inputSnapshot,
-            outputFormat: formats.outputSnapshot
+            outputFormat: formats.outputSnapshot,
+            expectedInputSampleRate: Double(AudioDeviceDiagnostics.currentRouteState().defaultInput.nominalHz)
         )
     }
 
@@ -523,7 +525,8 @@ final class AudioRecorder {
         let decision = RecordingStartupGate.tapInstallDecision(
             routeInvolvesBluetooth: routeState.activeRouteInvolvesBluetooth,
             inputFormat: graphFormats.inputSnapshot,
-            outputFormat: graphFormats.outputSnapshot
+            outputFormat: graphFormats.outputSnapshot,
+            expectedInputSampleRate: Double(routeState.defaultInput.nominalHz)
         )
 
         if !decision.shouldInstallTap {

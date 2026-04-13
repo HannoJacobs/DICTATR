@@ -2,6 +2,12 @@
 
 **Status:** current canonical Bluetooth investigation and resolution doc
 
+**Update after initial write-up:**
+
+- The recorder/startup fix first shipped as `1.31`, then the bundled version was promoted to `2.0` once the installed build had real headset retest evidence.
+- Installed-build AirPods retest evidence was captured in [`dictatr-20260413-175125-2e38e948.log`](/Users/hannojacobs/Library/Application%20Support/DICTATR/Logs/dictatr-20260413-175125-2e38e948.log) with successful session `c89d634e`.
+- Installed-build Bose QC45 retest evidence was captured in [`dictatr-20260413-185034-bd0e09bb.log`](/Users/hannojacobs/Library/Application%20Support/DICTATR/Logs/dictatr-20260413-185034-bd0e09bb.log) with successful sessions `4a9c4e7b` and `f03ba0c5`.
+
 **Current code paths:** [`Sources/DICTATR/AudioRecorder.swift`](/Users/hannojacobs/Documents/Code/DICTATR/Sources/DICTATR/AudioRecorder.swift), [`Sources/DICTATR/AppState.swift`](/Users/hannojacobs/Documents/Code/DICTATR/Sources/DICTATR/AppState.swift), [`Sources/DICTATR/CaptureSessionRecorder.swift`](/Users/hannojacobs/Documents/Code/DICTATR/Sources/DICTATR/CaptureSessionRecorder.swift), [`Sources/DICTATR/RecordingBackend.swift`](/Users/hannojacobs/Documents/Code/DICTATR/Sources/DICTATR/RecordingBackend.swift)
 
 ## Why this document exists

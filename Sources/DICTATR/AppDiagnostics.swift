@@ -86,6 +86,11 @@ enum AppDiagnostics {
         ].joined(separator: " ")
     }
 
+    static var recordingVersionSummary: String {
+        let bundlePath = Bundle.main.bundleURL.path
+        return "version=\(appVersion) build=\(buildVersion) bundlePath=\(bundlePath)"
+    }
+
     static func compactText(_ text: String, limit: Int = 500) -> String {
         let sanitized = text.replacingOccurrences(of: "\n", with: "\\n")
         guard sanitized.count > limit else { return sanitized }

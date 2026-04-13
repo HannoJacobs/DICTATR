@@ -11,7 +11,6 @@ require_command codesign
 require_command hdiutil
 require_command ditto
 
-require_file "$WORKSPACE_PATH"
 require_file "$SOURCE_PLIST"
 require_file "$CHANGELOG_PATH"
 require_file "$APP_ENTITLEMENTS_PATH"
@@ -22,14 +21,26 @@ note "Building Release archive"
 rm -rf "$BUILD_DIR" "$DMG_PATH"
 mkdir -p "$BUILD_DIR"
 
-xcodebuild \
-    -workspace "$WORKSPACE_PATH" \
-    -scheme "$SCHEME_NAME" \
-    -configuration Release \
-    -destination 'generic/platform=macOS' \
-    -archivePath "$ARCHIVE_PATH" \
-    CODE_SIGNING_ALLOWED=NO \
+xcodebuild_args=(
+    -scheme "$SCHEME_NAME"
+    -configuration Release
+    -destination 'generic/platform=macOS'
+    -archivePath "$ARCHIVE_PATH"
+    CODE_SIGNING_ALLOWED=NO
     archive
+)
+
+if [ -e "$WORKSPACE_PATH" ]; then
+    note "Using generated Xcode workspace at $WORKSPACE_PATH"
+    xcodebuild_args=(
+        -workspace "$WORKSPACE_PATH"
+        "${xcodebuild_args[@]}"
+    )
+else
+    note "Generated workspace not present at $WORKSPACE_PATH; building package scheme directly from repo root"
+fi
+
+xcodebuild "${xcodebuild_args[@]}"
 
 require_file "$ARCHIVE_BINARY_PATH"
 

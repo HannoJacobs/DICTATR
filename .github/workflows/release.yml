@@ -7,19 +7,9 @@ on:
 jobs:
   build-and-release:
     runs-on: macos-latest
-    permissions:
-      contents: write
 
     steps:
       - uses: actions/checkout@v4
-
-      - name: Build Release
-        run: |
-          xcodebuild \
-            -scheme DICTATR \
-            -configuration Release \
-            -destination 'platform=macOS' \
-            build
 
       - name: Create DMG
         env:
@@ -27,9 +17,8 @@ jobs:
           DICTATR_SPCTL_EXPECT: rejected
         run: bash create-dmg.sh
 
-      - name: Upload DMG to latest release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          LATEST_TAG=$(gh release list --limit 1 --json tagName -q '.[0].tagName')
-          gh release upload "$LATEST_TAG" DICTATR.dmg --clobber
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DICTATR-dmg
+          path: DICTATR.dmg

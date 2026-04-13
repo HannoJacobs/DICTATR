@@ -61,6 +61,7 @@ enum AudioGraphReadinessReason: String, Sendable {
     case invalidLiveFormat = "invalid_live_format"
     case graphMismatch = "graph_mismatch"
     case bluetoothGraphMismatch = "bluetooth_graph_mismatch"
+    case bluetoothRouteRateMismatch = "bluetooth_route_rate_mismatch"
 }
 
 struct AudioGraphReadinessDecision: Equatable, Sendable {
@@ -73,7 +74,8 @@ enum RecordingStartupGate {
     static func tapInstallDecision(
         routeInvolvesBluetooth: Bool,
         inputFormat: AudioGraphFormatSnapshot,
-        outputFormat: AudioGraphFormatSnapshot
+        outputFormat: AudioGraphFormatSnapshot,
+        expectedInputSampleRate: Double? = nil
     ) -> AudioGraphReadinessDecision {
         guard inputFormat.isValid, outputFormat.isValid else {
             return AudioGraphReadinessDecision(
@@ -91,6 +93,18 @@ enum RecordingStartupGate {
                 shouldInstallTap: false,
                 reason: routeInvolvesBluetooth ? .bluetoothGraphMismatch : .graphMismatch,
                 detail: "inputFormat={\(inputFormat.description)} outputFormat={\(outputFormat.description)}"
+            )
+        }
+
+        if routeInvolvesBluetooth,
+           let expectedInputSampleRate,
+           expectedInputSampleRate > 0,
+           abs(inputFormat.sampleRate - expectedInputSampleRate) > 1.0 {
+            let expectedDescription = String(format: "%.1f", expectedInputSampleRate)
+            return AudioGraphReadinessDecision(
+                shouldInstallTap: false,
+                reason: .bluetoothRouteRateMismatch,
+                detail: "expectedInputSampleRate={\(expectedDescription)Hz} inputFormat={\(inputFormat.description)} outputFormat={\(outputFormat.description)}"
             )
         }
 

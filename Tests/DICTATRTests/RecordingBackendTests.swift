@@ -6,7 +6,8 @@ final class RecordingBackendTests: XCTestCase {
         let decision = RecordingStartupGate.tapInstallDecision(
             routeInvolvesBluetooth: true,
             inputFormat: AudioGraphFormatSnapshot(sampleRate: 24_000, channelCount: 1),
-            outputFormat: AudioGraphFormatSnapshot(sampleRate: 48_000, channelCount: 1)
+            outputFormat: AudioGraphFormatSnapshot(sampleRate: 48_000, channelCount: 1),
+            expectedInputSampleRate: 24_000
         )
 
         XCTAssertFalse(decision.shouldInstallTap)
@@ -28,11 +29,24 @@ final class RecordingBackendTests: XCTestCase {
         let decision = RecordingStartupGate.tapInstallDecision(
             routeInvolvesBluetooth: true,
             inputFormat: AudioGraphFormatSnapshot(sampleRate: 24_000, channelCount: 1),
-            outputFormat: AudioGraphFormatSnapshot(sampleRate: 24_000, channelCount: 1)
+            outputFormat: AudioGraphFormatSnapshot(sampleRate: 24_000, channelCount: 1),
+            expectedInputSampleRate: 24_000
         )
 
         XCTAssertTrue(decision.shouldInstallTap)
         XCTAssertEqual(decision.reason, .readyLiveGraph)
+    }
+
+    func testBluetoothStaleGraphRateDeclinesTapInstall() {
+        let decision = RecordingStartupGate.tapInstallDecision(
+            routeInvolvesBluetooth: true,
+            inputFormat: AudioGraphFormatSnapshot(sampleRate: 44_100, channelCount: 1),
+            outputFormat: AudioGraphFormatSnapshot(sampleRate: 44_100, channelCount: 1),
+            expectedInputSampleRate: 16_000
+        )
+
+        XCTAssertFalse(decision.shouldInstallTap)
+        XCTAssertEqual(decision.reason, .bluetoothRouteRateMismatch)
     }
 
     func testRouteQuietAloneDoesNotSatisfyRetrySuccessGate() {
