@@ -182,7 +182,7 @@ What gets logged:
 - App launch / reopen with version, build, PID, macOS build, hardware model, bundle path, diagnostics file path, and Accessibility trust status
 - Model startup with selected WhisperKit variant, resolved model folder, compiled-cache snapshot, download milestones, per-phase timings, and long-load heartbeats
 - Full audio device inventory at launch
-- Recording start, input format, built-in mic override attempts, config changes, watchdog failures, retries, and force resets
+- Recording start, input format, config changes, watchdog failures, retries, and force resets
 - Stop/transcription/paste/history-save transitions
 
 Normal relaunches now prefer the local cached model folder directly when it already exists,
@@ -193,7 +193,7 @@ Useful commands:
 ```bash
 tail -f ~/Library/Application\ Support/DICTATR/Logs/latest.log
 ls -lt ~/Library/Application\ Support/DICTATR/Logs
-rg -n "watchdog|config change|retry|force reset|built-in mic|recording start" ~/Library/Application\ Support/DICTATR/Logs/latest.log
+rg -n "watchdog|config change|retry|force reset|recording start" ~/Library/Application\ Support/DICTATR/Logs/latest.log
 ```
 
 If DICTATR is stuck in a Bluetooth / HFP route fight, the menu now includes `Hard Reset Audio`.

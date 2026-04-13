@@ -10,7 +10,8 @@
 - Added an explicit `adhoc` release mode for local non-Developer-ID builds. That mode still verifies the shipped app and launch log, but it now explicitly forces the Accessibility re-enable flow because trust persistence is impossible without stable signing.
 - Launch diagnostics now record `accessibilityTrusted=yes|no`, so full-send verification can prove whether the installed app retained Accessibility permission after an upgrade.
 
-## Unreleased
+## 1.24
+- Documented the product rule that DICTATR must use the active headphone microphone when headphones are the selected route, and that built-in mic fallback is not an allowed workaround for Bluetooth regressions.
 
 ## 1.22
 - Removed the built-in-mic fallback path so DICTATR now stays on the active system route instead of switching away from Bluetooth input during recovery.
