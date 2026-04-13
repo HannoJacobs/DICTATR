@@ -239,7 +239,29 @@ final class TranscriptionEngine {
             .joined(separator: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
-        return text
+        return Self.normalizeTranscription(text)
+    }
+
+    private static func normalizeTranscription(_ text: String) -> String {
+        // Whisper models can emit bracketed control markers for silence/non-speech.
+        // Those should not be treated as user-visible dictation.
+        let placeholderTokens: Set<String> = [
+            "[BLANK_AUDIO]",
+            "[BLANK AUDIO]",
+            "[NO_AUDIO]",
+            "[NO AUDIO]",
+            "[SILENCE]",
+            "[MUSIC]",
+            "[NOISE]"
+        ]
+
+        let cleaned = text
+            .split(whereSeparator: \.isWhitespace)
+            .filter { !placeholderTokens.contains($0.uppercased()) }
+            .joined(separator: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        return cleaned
     }
 
     private static func selectModel() -> ModelSelection {
