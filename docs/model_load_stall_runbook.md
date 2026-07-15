@@ -17,9 +17,11 @@ The strongest evidence was:
 
 ## Current Policy
 
-- DICTATR now logs both `effectiveVariant` and `whisperKitDefault` during model selection.
-- On the affected M1 Mac class, DICTATR overrides WhisperKit's `openai_whisper-large-v3-v20240930_626MB` default and uses `openai_whisper-small.en` instead.
-- Treat any future reappearance of the old large-v3 default on this machine as a model-selection regression first, not just a cache incident.
+- DICTATR defaults to `openai_whisper-small.en` when `selectedWhisperModelVariant` is absent or invalid.
+- Settings can explicitly select `openai_whisper-large-v3-v20240930_626MB`. An intentional Large V3 selection is not a regression, but it can legitimately trigger a multi-minute compile even when its model files are already cached.
+- Diagnostics distinguish `selected`, `target`, and `active`. Only `active` names the pipeline that completed loading successfully; during loading or failure it may be `nil` even though the selected preference remains Large V3.
+- WhisperKit's recommended model is still logged for context, but it no longer overrides the persisted user choice.
+- Treat Large V3 as a model-selection regression only when the stored selection resolves to Small while the logged target or active variant is Large.
 
 ## Fast Triage
 
@@ -32,14 +34,16 @@ tail -n 80 ~/Library/Application\ Support/DICTATR/Logs/latest.log
 2. Confirm whether the failure is a warm-cache compile stall:
 
 ```bash
-rg -n "Model variant selected|CoreML load started|Model load still running|Model load completed|compiledCache" ~/Library/Application\ Support/DICTATR/Logs/latest.log
+rg -n "selected=|target=|active=|CoreML load started|Model load still running|Model load completed|Model load failed|compiledCache" ~/Library/Application\ Support/DICTATR/Logs/latest.log
 ```
 
 Treat it as a compiled-cache incident when:
-- The logged `effectiveVariant` matches the current policy for this machine.
+- The logged target matches the stored selection shown in Settings/defaults.
 - The model folder is already local.
 - `compiledCache exists=yes`.
 - The app stays in `Compiling on-device model...` for much longer than the normal warm path.
+
+Before resetting caches, confirm that no model switch is currently running. DICTATR switches with one pipeline only: it unloads the active model before loading the selected target, and the picker is disabled while recording, transcribing, serving an HTTP transcription, loading, or switching.
 
 3. If needed, sample the live process:
 
@@ -59,7 +63,7 @@ tail -f ~/Library/Application\ Support/DICTATR/Logs/latest.log
 ```
 
 What to expect:
-- The next launch should log `Model variant selected ...`.
+- The next launch should log the selected/target variant and later the exact active variant after a successful load.
 - The next launch should log `compiledCache=missing` before compile begins.
 - The app will do a cold ANE compile again, which may still take several minutes.
 - A healthy warm cache should make later launches fast again.

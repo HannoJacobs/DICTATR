@@ -1,67 +1,25 @@
 ---
-description: '"Full send" means full deployment — commit, release, push, website, and local app swap'
+description: '"Full send" means the complete verified release path in AGENTS.md'
 alwaysApply: true
 ---
 
-# "Full Send" Deployment Checklist
+# Full-send release checklist
 
-When the user says **"full send"**, **"fully deploy"**, or **"deploy everything"**, execute ALL of the following steps in order. Nothing is done until all steps are complete.
+`AGENTS.md` is canonical. If this rule ever conflicts with `AGENTS.md`, the release scripts, or the live repository workflow, stop and fix the rule before releasing.
 
-## Steps
+When the user says **full send**, complete every step; do not equate a commit, build, or workflow artifact with a shipped release.
 
-1. **Bump version** in `create-dmg.sh` — update both `CFBundleVersion` and `CFBundleShortVersionString` to the next version number.
-   - This is **not dynamic**. The DMG bundle metadata comes from the hardcoded `Info.plist` block inside `create-dmg.sh`.
+1. Set both `CFBundleShortVersionString` and `CFBundleVersion` in `Sources/DICTATR/Info.plist`.
+2. Add the detailed operator-facing section for that version to `CHANGELOG.md` and update README/site/runbooks affected by the release.
+3. Run focused tests, the full `swift test` suite, `swift build -c release`, and `git diff --check`.
+4. Commit the complete source state and push `main`.
+5. Require the `Build and Release DMG` workflow for that pushed SHA to pass. It runs tests, builds the DMG, and uploads a workflow artifact; it does **not** publish a GitHub release.
+6. Run `./create-dmg.sh` locally and verify the resulting app version, signature, entitlements, DMG size, and checksum.
+7. Create or update the GitHub release explicitly with the verified local `DICTATR.dmg` and the current changelog section. Confirm `releases/latest/download/DICTATR.dmg` resolves to that release asset.
+8. Copy the fresh DMG to `~/Downloads/DICTATR.dmg`, run `./install-release.sh`, and verify the installed `/Applications/DICTATR.app` from launch logs and live product behavior.
+9. Verify GitHub Pages serves the updated copy and dynamically displays the latest release tag.
 
-2. **Commit** all changes:
-   ```
-   git add <changed files>
-   git commit -m "vX.Y: <summary of changes>"
-   ```
-
-3. **Create GitHub release BEFORE pushing** (so CI can upload the DMG to it):
-   ```
-   gh release create vX.Y \
-     --title "vX.Y — <title>" \
-     --notes "<release notes>"
-   ```
-
-4. **Push to main** — triggers CI (`.github/workflows/release.yml`) which:
-   - Builds the Release binary via `xcodebuild`
-   - Runs `create-dmg.sh` to package the `.app`
-   - Uploads `DICTATR.dmg` to the new GitHub release
-   ```
-   git push
-   ```
-
-5. **Website updates automatically**:
-   - The download URL is stable: `releases/latest/download/DICTATR.dmg`
-   - The visible website version label is now dynamic and is fetched from the latest GitHub release `tag_name`
-   - No manual website version bump is needed unless the page copy/layout itself changes
-
-6. **Swap the locally running app** (run in parallel with CI):
-   ```bash
-   # Build
-   DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild \
-     -scheme DICTATR -configuration Release -destination 'platform=macOS' build
-
-   # Find binary
-   BINARY=$(find ~/Library/Developer/Xcode/DerivedData -path "*/Release/DICTATR" -type f | head -1)
-
-   # Kill, replace, relaunch
-   kill $(pgrep -x DICTATR)
-   cp "$BINARY" /Applications/DICTATR.app/Contents/MacOS/DICTATR
-
-   # Keep local Finder/About version metadata in sync with the deployed binary
-   /usr/libexec/PlistBuddy -c "Set :CFBundleVersion X.Y" /Applications/DICTATR.app/Contents/Info.plist
-   /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString X.Y" /Applications/DICTATR.app/Contents/Info.plist
-
-   open /Applications/DICTATR.app
-   ```
-
-7. **Verify versions after deploy**:
-   - `gh release view vX.Y` should show the uploaded `DICTATR.dmg`
-   - `/Applications/DICTATR.app/Contents/Info.plist` should report the same version as the release
-   - `docs/index.html` should show the latest release version automatically once GitHub Pages redeploys
+Never replace only the executable inside an existing app, mutate the installed Info.plist, or bypass `create-dmg.sh` / `install-release.sh`; doing so invalidates the package/signature evidence.
 
 ## Hosting
 

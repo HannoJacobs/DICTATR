@@ -128,6 +128,37 @@ final class AppState {
             )
         }
     }
+
+    var selectedModelChoice: WhisperModelChoice = WhisperModelChoice.read() {
+        didSet {
+            WhisperModelChoice.write(selectedModelChoice)
+            logObservableChange(
+                name: "selectedModelChoice",
+                oldValue: oldValue.rawValue,
+                newValue: selectedModelChoice.rawValue
+            )
+        }
+    }
+
+    var isModelSwitching = false {
+        didSet {
+            logObservableChange(
+                name: "isModelSwitching",
+                oldValue: String(oldValue),
+                newValue: String(isModelSwitching)
+            )
+        }
+    }
+
+    private(set) var inFlightHTTPTranscriptions = 0 {
+        didSet {
+            guard oldValue != inFlightHTTPTranscriptions else { return }
+            AppDiagnostics.info(
+                .appState,
+                "http transcription in-flight count=\(inFlightHTTPTranscriptions)"
+            )
+        }
+    }
     var microphonePermissionStatus: MicrophoneAuthorizationState = MicrophonePermissionManager.authorizationState() {
         didSet {
             logObservableChange(
@@ -146,7 +177,9 @@ final class AppState {
     private var hotkeyManager: HotkeyManager?
     private var httpServer: LocalHTTPServer?
     private var modelLoadTask: Task<Void, Never>?
+    private var modelLoadTaskEpoch = 0
     private var transcriptionTask: Task<Void, Never>?
+    private var transcriptionTaskEpoch = 0
     private var autoRetryTask: Task<Void, Never>?
     private var recordingStartTask: Task<Void, Never>?
     private var autoRetryCount = 0
@@ -171,7 +204,42 @@ final class AppState {
     var isModelLoading: Bool { transcriptionEngine.isLoading }
     var configuredModelVariant: String { transcriptionEngine.configuredModelVariant }
     var configuredModelPolicySummary: String { transcriptionEngine.configuredModelPolicySummary }
+    var activeModelVariant: String? { transcriptionEngine.activeModelVariant }
     var shouldShowOnboarding: Bool { !hasCompletedOnboarding || !microphonePermissionStatus.isAuthorized }
+
+    var modelSwitchSnapshot: ModelSwitchPolicy.Snapshot {
+        ModelSwitchPolicy.Snapshot(
+            dictationState: currentState,
+            isModelLoading: transcriptionEngine.isLoading,
+            hasModelLoadTask: modelLoadTask != nil,
+            isModelSwitching: isModelSwitching,
+            hasInFlightLocalTranscription: transcriptionTask != nil,
+            inFlightHTTPTranscriptions: inFlightHTTPTranscriptions,
+            recordingStartInProgress: recordingStartTask != nil,
+            isRecorderRecording: audioRecorder.isRecording,
+            recordingRecoveryPending: recordingRecoveryPending
+        )
+    }
+
+    var canEditModelSelection: Bool {
+        ModelSwitchPolicy.canEditSelection(modelSwitchSnapshot)
+    }
+
+    var canBeginRecordingAction: Bool {
+        ModelSwitchPolicy.canStartRecording(modelSwitchSnapshot)
+    }
+
+    var canStartDictationFromMenu: Bool {
+        currentState == .idle && transcriptionEngine.isModelLoaded && canBeginRecordingAction
+    }
+
+    var modelSwitchBlockedReason: ModelSwitchBlockedReason? {
+        ModelSwitchPolicy.blockedReason(modelSwitchSnapshot)
+    }
+
+    var modelSwitchAvailabilityMessage: String? {
+        modelSwitchBlockedReason?.userFacingMessage
+    }
 
     private func logObservableChange(name: String, oldValue: String, newValue: String) {
         guard oldValue != newValue else { return }
@@ -189,6 +257,11 @@ final class AppState {
             "lastTranscriptionChars=\(lastTranscription?.count ?? 0)",
             "isModelLoaded=\(AppDiagnostics.boolLabel(transcriptionEngine.isModelLoaded))",
             "isModelLoading=\(AppDiagnostics.boolLabel(transcriptionEngine.isLoading))",
+            "selectedModel=\(selectedModelChoice.rawValue)",
+            "activeModel=\(transcriptionEngine.activeModelVariant ?? "nil")",
+            "isModelSwitching=\(AppDiagnostics.boolLabel(isModelSwitching))",
+            "httpInFlight=\(inFlightHTTPTranscriptions)",
+            "localTranscriptionInFlight=\(AppDiagnostics.boolLabel(transcriptionTask != nil))",
             "microphoneStatus=\(microphonePermissionStatus.rawValue)",
             "autoPasteEnabled=\(AppDiagnostics.boolLabel(autoPasteEnabled))",
             "retentionCount=\(retentionCount)",
@@ -205,7 +278,13 @@ final class AppState {
         RecordingDiagnostics.shared.setRecorderState(.idle)
 
         // Register defaults (idempotent, never overwrites explicit user choices)
-        UserDefaults.standard.register(defaults: ["autoPasteEnabled": true])
+        UserDefaults.standard.register(defaults: [
+            "autoPasteEnabled": true,
+            WhisperModelChoice.defaultsKey: WhisperModelChoice.defaultChoice.rawValue
+        ])
+
+        // Re-read after register so absent key resolves to the documented small default.
+        selectedModelChoice = WhisperModelChoice.read()
 
         // One-time migration: reset shortcut to new F5 default
         if !UserDefaults.standard.bool(forKey: "shortcutMigratedToF5") {
@@ -225,7 +304,7 @@ final class AppState {
 
         AppDiagnostics.info(
             .appState,
-            "AppState initialized \(AppDiagnostics.runtimeSummary) autoPasteEnabled=\(autoPasteEnabled) retentionCount=\(retentionCount) onboardingComplete=\(hasCompletedOnboarding) databaseAvailable=\(databaseManager != nil) snapshot={\(stateSnapshot())} devices=\(AudioDeviceDiagnostics.availableDevicesSnapshot())"
+            "AppState initialized \(AppDiagnostics.runtimeSummary) selectedModel=\(selectedModelChoice.rawValue) autoPasteEnabled=\(autoPasteEnabled) retentionCount=\(retentionCount) onboardingComplete=\(hasCompletedOnboarding) databaseAvailable=\(databaseManager != nil) snapshot={\(stateSnapshot())} devices=\(AudioDeviceDiagnostics.availableDevicesSnapshot())"
         )
         AppDiagnostics.info(
             .audioDevices,
@@ -275,9 +354,7 @@ final class AppState {
         // before the model is ready get a 500 "model not loaded" response.
         httpServer = LocalHTTPServer { [weak self] url in
             guard let self else { throw TranscriptionError.modelNotLoaded }
-            let engine = try await self.httpTranscriptionEngine()
-            let output = try await engine.transcribe(audioURL: url)
-            return output.text
+            return try await self.transcribeHTTPAudio(at: url)
         }
         httpServer?.start()
 
@@ -333,38 +410,135 @@ final class AppState {
     }
 
     func startModelDownload() {
-        guard !transcriptionEngine.isLoading, !transcriptionEngine.isModelLoaded else { return }
-        modelLoadTask?.cancel()
+        // Never cancel an in-progress load/switch. Startup and Retry only begin when idle.
+        guard !isModelSwitching,
+              !transcriptionEngine.isLoading,
+              !transcriptionEngine.isModelLoaded,
+              modelLoadTask == nil
+        else {
+            AppDiagnostics.warning(
+                .appState,
+                "startModelDownload ignored switching=\(AppDiagnostics.boolLabel(isModelSwitching)) loading=\(AppDiagnostics.boolLabel(transcriptionEngine.isLoading)) loaded=\(AppDiagnostics.boolLabel(transcriptionEngine.isModelLoaded)) modelLoadTask=\(AppDiagnostics.boolLabel(modelLoadTask != nil))"
+            )
+            return
+        }
+
+        let choice = selectedModelChoice
+        modelLoadTaskEpoch += 1
+        let modelTaskEpoch = modelLoadTaskEpoch
         modelLoadTask = Task { [weak self] in
             guard let self else { return }
+            defer {
+                if self.modelLoadTaskEpoch == modelTaskEpoch {
+                    self.modelLoadTask = nil
+                }
+            }
             do {
-                AppDiagnostics.info(.appState, "Model load started")
+                AppDiagnostics.info(
+                    .appState,
+                    "Model load started selected=\(choice.rawValue) active=\(self.transcriptionEngine.activeModelVariant ?? "nil")"
+                )
                 self.statusMessage = "Loading model..."
-                try await self.transcriptionEngine.loadModel()
-                if Task.isCancelled { return }
+                try await self.transcriptionEngine.loadModel(choice: choice)
                 self.statusMessage = "Ready"
                 self.errorMessage = nil
-                AppDiagnostics.info(.appState, "Model load completed successfully")
+                AppDiagnostics.info(
+                    .appState,
+                    "Model load completed successfully selected=\(choice.rawValue) active=\(self.transcriptionEngine.activeModelVariant ?? "nil")"
+                )
             } catch {
-                if Task.isCancelled { return }
                 self.statusMessage = "Model load failed"
                 self.errorMessage = "Model load failed: \(error.localizedDescription)"
-                AppDiagnostics.error(.appState, "Model load failed error=\(error.localizedDescription)")
+                AppDiagnostics.error(
+                    .appState,
+                    "Model load failed selected=\(choice.rawValue) active=\(self.transcriptionEngine.activeModelVariant ?? "nil") error=\(error.localizedDescription)"
+                )
             }
         }
     }
 
     func retryModelLoad() {
-        guard !transcriptionEngine.isLoading else {
+        guard !transcriptionEngine.isLoading,
+              !isModelSwitching,
+              modelLoadTask == nil
+        else {
             AppDiagnostics.warning(.appState, "retryModelLoad ignored because model load is already in progress")
             errorMessage = "Model load is already in progress."
             return
         }
 
-        AppDiagnostics.info(.appState, "retryModelLoad requested")
+        AppDiagnostics.info(.appState, "retryModelLoad requested selected=\(selectedModelChoice.rawValue)")
         errorMessage = nil
         statusMessage = "Loading model..."
         startModelDownload()
+    }
+
+    func applyModelSelection(_ choice: WhisperModelChoice) {
+        let snapshot = modelSwitchSnapshot
+        guard ModelSwitchPolicy.canEditSelection(snapshot) else {
+            let reason = ModelSwitchPolicy.blockedReason(snapshot)
+            AppDiagnostics.warning(
+                .appState,
+                "applyModelSelection ignored choice=\(choice.rawValue) reason=\(reason?.rawValue ?? "unknown") snapshot={\(stateSnapshot())}"
+            )
+            if let message = reason?.userFacingMessage {
+                errorMessage = message
+            }
+            return
+        }
+
+        selectedModelChoice = choice
+
+        guard ModelSwitchPolicy.shouldReload(
+            selected: choice,
+            activeVariant: transcriptionEngine.activeModelVariant
+        ) else {
+            AppDiagnostics.info(
+                .appState,
+                "applyModelSelection no-op selected already active choice=\(choice.rawValue)"
+            )
+            return
+        }
+
+        isModelSwitching = true
+        errorMessage = nil
+        statusMessage = "Switching model..."
+        AppDiagnostics.info(
+            .appState,
+            "applyModelSelection started selected=\(choice.rawValue) previousActive=\(transcriptionEngine.activeModelVariant ?? "nil")"
+        )
+
+        modelLoadTaskEpoch += 1
+        let modelTaskEpoch = modelLoadTaskEpoch
+        modelLoadTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if self.modelLoadTaskEpoch == modelTaskEpoch {
+                    self.modelLoadTask = nil
+                    self.isModelSwitching = false
+                }
+            }
+
+            do {
+                // Exactly one pipeline: unload, nil, then load the selected choice.
+                await self.transcriptionEngine.unloadActiveModel()
+                self.statusMessage = "Loading model..."
+                try await self.transcriptionEngine.loadModel(choice: choice)
+                self.statusMessage = "Ready"
+                self.errorMessage = nil
+                AppDiagnostics.info(
+                    .appState,
+                    "applyModelSelection completed selected=\(choice.rawValue) active=\(self.transcriptionEngine.activeModelVariant ?? "nil")"
+                )
+            } catch {
+                self.statusMessage = "Model load failed"
+                self.errorMessage = "Model load failed: \(error.localizedDescription)"
+                AppDiagnostics.error(
+                    .appState,
+                    "applyModelSelection failed selected=\(choice.rawValue) active=\(self.transcriptionEngine.activeModelVariant ?? "nil") error=\(error.localizedDescription)"
+                )
+            }
+        }
     }
 
     func toggleRecording() {
@@ -375,6 +549,12 @@ final class AppState {
         )
         switch currentState {
         case .idle:
+            guard canBeginRecordingAction else {
+                statusMessage = "Model busy"
+                errorMessage = "Wait for the current model operation to finish before starting dictation."
+                AppDiagnostics.warning(.appState, "toggleRecording blocked by model activity snapshot={\(stateSnapshot())}")
+                return
+            }
             if recordingStartTask != nil || audioRecorder.isRecording {
                 statusMessage = microphonePermissionStatus == .notDetermined ? "Requesting microphone access..." : "Starting recording..."
                 errorMessage = "Recording start is already in progress. Please wait."
@@ -414,6 +594,13 @@ final class AppState {
     }
 
     private func startRecording() async {
+        guard canBeginRecordingAction else {
+            statusMessage = "Model busy"
+            errorMessage = "Wait for the current model operation to finish before starting dictation."
+            AppDiagnostics.warning(.appState, "startRecording blocked by model activity snapshot={\(stateSnapshot())}")
+            return
+        }
+
         refreshPermissionStates(source: "startRecording")
         switch microphonePermissionStatus {
         case .authorized:
@@ -719,10 +906,21 @@ final class AppState {
     }
 
     private func httpTranscriptionEngine() throws -> TranscriptionEngine {
+        guard !isModelSwitching else {
+            throw TranscriptionError.modelNotLoaded
+        }
         guard transcriptionEngine.isModelLoaded else {
             throw TranscriptionError.modelNotLoaded
         }
         return transcriptionEngine
+    }
+
+    private func transcribeHTTPAudio(at url: URL) async throws -> String {
+        let engine = try httpTranscriptionEngine()
+        inFlightHTTPTranscriptions += 1
+        defer { inFlightHTTPTranscriptions = max(0, inFlightHTTPTranscriptions - 1) }
+        let output = try await engine.transcribe(audioURL: url)
+        return output.text
     }
 
     private func stopRecordingAndTranscribe() {
@@ -802,14 +1000,22 @@ final class AppState {
             "recording forensic summary context={\(RecordingDiagnostics.shared.contextSnapshot())} session=\(sessionID) capture={\(result.forensics.captureSnapshot.snapshot)} routeAtStartFingerprint=\(result.forensics.routeAtStartFingerprint) routeAtStopFingerprint=\(result.forensics.routeAtStopFingerprint) routeAtTranscriptionStartFingerprint=\(transcriptionStartRoute.fingerprint) routeChangedDuringSession=\(AppDiagnostics.boolLabel(result.forensics.routeChangedDuringSession)) routeChangedBeforeTranscription=\(AppDiagnostics.boolLabel(result.forensics.routeAtStopFingerprint != transcriptionStartRoute.fingerprint)) stalledHeartbeatObserved=\(AppDiagnostics.boolLabel(result.forensics.captureStalledDuringSession)) silentDespiteNonZeroFrames=\(AppDiagnostics.boolLabel(silentDespiteFrames)) lastKnownInput={\(result.forensics.lastKnownInputSnapshot)} lastKnownOutput={\(result.forensics.lastKnownOutputSnapshot)} routeAtStop={\(result.forensics.routeAtStopSnapshot)} routeAtTranscriptionStart={\(transcriptionStartRoute.routeSnapshot)}"
         )
 
-        // Cancel any lingering previous transcription task
+        // Cancel any lingering previous transcription task; epoch keeps completed
+        // tasks from clearing a newer latch.
         transcriptionTask?.cancel()
+        transcriptionTaskEpoch += 1
+        let transcriptionEpoch = transcriptionTaskEpoch
 
         transcriptionTask = Task { [weak self] in
             do {
                 guard let self else {
                     try? FileManager.default.removeItem(at: result.url)
                     return
+                }
+                defer {
+                    if self.transcriptionTaskEpoch == transcriptionEpoch {
+                        self.transcriptionTask = nil
+                    }
                 }
                 let transcription = try await self.transcriptionEngine.transcribe(audioURL: result.url)
                 AppDiagnostics.info(

@@ -55,11 +55,68 @@ struct GeneralSettingsView: View {
             }
 
             Section("Transcription") {
+                Picker("Model", selection: selectedModelBinding) {
+                    ForEach(WhisperModelChoice.allCases, id: \.self) { choice in
+                        Text(choice.pickerLabel).tag(choice)
+                    }
+                }
+                .disabled(!appState.canEditModelSelection)
+
+                Text(appState.selectedModelChoice.detailText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                if let blocked = appState.modelSwitchAvailabilityMessage {
+                    Text(blocked)
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+
                 HStack {
-                    Text("Active Model:")
+                    Text("Selected:")
                     Spacer()
-                    Text(appState.configuredModelVariant)
+                    Text(appState.selectedModelChoice.rawValue)
                         .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+
+                HStack {
+                    Text("Active:")
+                    Spacer()
+                    Text(appState.activeModelVariant ?? "Not loaded")
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+
+                if appState.isModelLoading || appState.isModelSwitching {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(modelProgressTitle)
+                            .font(.caption)
+                        if !appState.transcriptionEngine.loadingDetail.isEmpty {
+                            Text(appState.transcriptionEngine.loadingDetail)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                        if appState.transcriptionEngine.loadingPhase == "Downloading model..." {
+                            ProgressView(value: appState.transcriptionEngine.downloadProgress)
+                        } else {
+                            ProgressView()
+                        }
+                    }
+                }
+
+                if let error = appState.errorMessage,
+                   !appState.isModelLoading,
+                   !appState.isModelSwitching,
+                   !appState.isModelLoaded {
+                    Text(error)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                    Button("Retry Model Load") {
+                        appState.retryModelLoad()
+                    }
                 }
 
                 Text(appState.configuredModelPolicySummary)
@@ -80,6 +137,22 @@ struct GeneralSettingsView: View {
         }
         .formStyle(.grouped)
         .padding()
+    }
+
+    private var selectedModelBinding: Binding<WhisperModelChoice> {
+        Binding(
+            get: { appState.selectedModelChoice },
+            set: { appState.applyModelSelection($0) }
+        )
+    }
+
+    private var modelProgressTitle: String {
+        if appState.isModelSwitching && !appState.isModelLoading {
+            return "Unloading active model..."
+        }
+        return appState.transcriptionEngine.loadingPhase.isEmpty
+            ? "Loading model..."
+            : appState.transcriptionEngine.loadingPhase
     }
 
     private var currentShortcutLabel: String {

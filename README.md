@@ -12,7 +12,7 @@ all in one step. Runs 100% on-device using WhisperKit — no cloud, no subscript
 Hotkey (F5)
     │
     ▼
-AudioRecorder          — AVAudioEngine, captures mic at 16kHz mono WAV
+AudioRecorder          — AVCaptureSession, writes 16kHz mono WAV
     │
     ▼
 TranscriptionEngine    — WhisperKit (Apple Neural Engine), on-device Whisper model
@@ -49,11 +49,15 @@ Everything is orchestrated by `AppState`, a central `@Observable @MainActor` cla
 4. Grant **Microphone** permission when prompted
 5. Grant **Accessibility** in System Settings → Privacy & Security → Accessibility
 
-On first launch the WhisperKit model downloads. DICTATR now prefers a faster English-only
-model on the affected M1 Mac class instead of WhisperKit's heavier large-v3 default, because
-that default was taking multiple minutes to compile after installs and cache resets.
+On first launch the WhisperKit model downloads. DICTATR defaults to the English-only
+`openai_whisper-small.en` model for faster startup on this Mac class. Settings → General
+also exposes an explicit optional chooser for `openai_whisper-large-v3-v20240930_626MB`
+(~626 MB download; first use may take several minutes to compile). The app keeps exactly
+one WhisperKit pipeline loaded: switching models only happens while DICTATR is fully idle,
+then unloads the active model before loading the selected one. Selected and active are
+shown separately so a failed load never pretends the new model is already live.
 After an install, update, or cache reset, the first CoreML/Apple Neural Engine compile can
-still take time, but it should no longer block behind the slowest known default path on this Mac.
+still take time, especially for Large V3, but the menu stays available during long compiles.
 
 ---
 
@@ -199,7 +203,7 @@ latest.log
 ```
 
 What gets logged:
-- Model policy selection, including the effective variant, the WhisperKit default, and the reason for any reliability override
+- Model selection and lifecycle, including the persisted selection, requested target, successfully active variant, and WhisperKit recommendation for context
 - App launch / reopen with version, build, PID, macOS build, hardware model, bundle path, diagnostics file path, and Accessibility trust status
 - Model startup with selected WhisperKit variant, resolved model folder, compiled-cache snapshot, download milestones, per-phase timings, and long-load heartbeats
 - Full audio device inventory at launch
@@ -218,8 +222,9 @@ rg -n "watchdog|config change|retry|force reset|recording start" ~/Library/Appli
 ```
 
 If the app keeps relaunching into `Compiling on-device model...` for multiple minutes,
-check the logged `effectiveVariant` first. A repeated stall on the old large-v3 default is
-now a model-policy bug; a repeated stall on the selected variant is a compiled-cache incident.
+compare the logged `selected`, `target`, and `active` values first. Large V3 is intentional
+when selected in Settings; a target that differs from the stored selection is a policy bug,
+while a repeated stall on the selected target is a compiled-cache/Core ML incident.
 
 Immediate recovery:
 
@@ -258,7 +263,7 @@ The app is `LSUIElement = true` (no Dock icon). It lives only in the menu bar.
 Sources/DICTATR/
   DICTATRApp.swift              — @main, MenuBarExtra scene + History window scene
   AppState.swift                — central state, pipeline orchestration
-  AudioRecorder.swift           — AVAudioEngine, 16kHz mono WAV
+  AudioRecorder.swift           — AVCaptureSession, 16kHz mono WAV
   TranscriptionEngine.swift     — WhisperKit wrapper, two-phase download+load
   HotkeyManager.swift           — KeyboardShortcuts listener (F5 default)
   PasteManager.swift            — NSPasteboard + CGEvent Cmd+V simulation

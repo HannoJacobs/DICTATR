@@ -180,7 +180,8 @@ struct MenuBarView: View {
             ) {
                 appState.toggleRecording()
             }
-            .opacity(appState.currentState == .transcribing || !appState.isModelLoaded ? 0.4 : 1)
+            .opacity(appState.currentState == .recording || appState.canStartDictationFromMenu ? 1 : 0.4)
+            .allowsHitTesting(appState.currentState == .recording || appState.canStartDictationFromMenu)
 
             Divider()
 

@@ -11,6 +11,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Run tests
+        run: swift test
+
       - name: Create DMG
         env:
           DICTATR_CODESIGN_MODE: adhoc

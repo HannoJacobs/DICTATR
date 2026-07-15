@@ -39,12 +39,6 @@ final class TranscriptionEngine {
         let containsOnlyPlaceholderTokens: Bool
     }
 
-    private struct ModelSelection {
-        let variant: String
-        let whisperKitDefault: String
-        let reason: String
-    }
-
     private struct ModelLoadRecoveryState: Codable {
         let variant: String
         let stage: String
@@ -63,8 +57,6 @@ final class TranscriptionEngine {
     }
 
     private static let compileWarningThreshold: TimeInterval = 90
-    private static let slowStartupDefaultVariant = "openai_whisper-large-v3-v20240930_626MB"
-    private static let reliabilityFallbackVariant = "openai_whisper-small.en"
 
     private(set) var isModelLoaded = false
     private(set) var isLoading = false
@@ -73,33 +65,39 @@ final class TranscriptionEngine {
     private(set) var loadingDetail: String = ""
     private(set) var configuredModelVariant = "Selecting model..."
     private(set) var configuredModelPolicySummary = "Waiting for WhisperKit model selection."
+    /// Exact loaded variant after a successful load; nil until then / after unload.
+    private(set) var activeModelVariant: String?
 
     private var whisperKit: WhisperKit?
     private var loadHeartbeatTask: Task<Void, Never>?
     private var nextDownloadLogThreshold: Double = 0.1
     private var hasLoggedWarmCompileWarning = false
 
-    func loadModel() async throws {
+    func loadModel(choice: WhisperModelChoice) async throws {
         guard !isLoading else {
-            AppDiagnostics.warning(.transcriptionEngine, "loadModel ignored because a model load is already in progress phase=\(loadingPhase)")
+            AppDiagnostics.warning(
+                .transcriptionEngine,
+                "loadModel ignored because a model load is already in progress phase=\(loadingPhase) requested=\(choice.rawValue) active=\(activeModelVariant ?? "nil")"
+            )
             return
         }
 
         let loadStartedAt = Date()
+        let variant = choice.rawValue
         isLoading = true
         downloadProgress = 0
         loadingPhase = "Selecting model..."
         loadingDetail = "Inspecting device support and cached WhisperKit files."
         nextDownloadLogThreshold = 0.1
+        configuredModelVariant = variant
+        configuredModelPolicySummary = Self.modelPolicySummary(for: choice)
+        activeModelVariant = nil
 
         do {
-            let selection = Self.selectModel()
-            let variant = selection.variant
-            configuredModelVariant = variant
-            configuredModelPolicySummary = Self.modelPolicySummary(for: selection)
+            let recommended = WhisperKit.recommendedModels()
             AppDiagnostics.info(
                 .transcriptionEngine,
-                "Model variant selected effectiveVariant=\(selection.variant) whisperKitDefault=\(selection.whisperKitDefault) reason=\(selection.reason)"
+                "Model load requested selected=\(variant) target=\(variant) active=\(activeModelVariant ?? "nil") whisperKitRecommended=\(recommended.default) supportedCount=\(recommended.supported.count)"
             )
             Self.recoverFromInterruptedCompileIfNeeded(for: variant)
             let compiledCacheExistedAtStart = Self.compiledCacheExists()
@@ -204,9 +202,10 @@ final class TranscriptionEngine {
 
             self.whisperKit = pipe
             self.isModelLoaded = true
+            self.activeModelVariant = variant
             let compileElapsed = Date().timeIntervalSince(compileStartedAt)
             let totalElapsed = Date().timeIntervalSince(loadStartedAt)
-            let completionMessage = "Model load completed variant=\(variant) folder=\(modelFolder.path) compileElapsed=\(Self.durationString(compileElapsed)) totalElapsed=\(Self.durationString(totalElapsed)) compiledCache=\(Self.compiledCacheSummary())"
+            let completionMessage = "Model load completed selected=\(variant) target=\(variant) active=\(variant) folder=\(modelFolder.path) compileElapsed=\(Self.durationString(compileElapsed)) totalElapsed=\(Self.durationString(totalElapsed)) compiledCache=\(Self.compiledCacheSummary())"
             if totalElapsed >= 30 {
                 AppDiagnostics.warning(.transcriptionEngine, completionMessage)
             } else {
@@ -216,14 +215,37 @@ final class TranscriptionEngine {
             resetLoadingState()
         } catch {
             let elapsed = Date().timeIntervalSince(loadStartedAt)
+            activeModelVariant = nil
+            isModelLoaded = false
             AppDiagnostics.error(
                 .transcriptionEngine,
-                "Model load failed phase=\(loadingPhase) detail=\(loadingDetail) progress=\(Self.progressString(downloadProgress)) elapsed=\(Self.durationString(elapsed)) compiledCache=\(Self.compiledCacheSummary()) error=\(error.localizedDescription)"
+                "Model load failed selected=\(variant) target=\(variant) active=nil phase=\(loadingPhase) detail=\(loadingDetail) progress=\(Self.progressString(downloadProgress)) elapsed=\(Self.durationString(elapsed)) compiledCache=\(Self.compiledCacheSummary()) error=\(error.localizedDescription)"
             )
             Self.clearModelLoadRecoveryState()
             resetLoadingState()
             throw error
         }
+    }
+
+    func unloadActiveModel() async {
+        let previousActive = activeModelVariant ?? "nil"
+        AppDiagnostics.info(
+            .transcriptionEngine,
+            "Model unload started active=\(previousActive) configured=\(configuredModelVariant)"
+        )
+        stopLoadHeartbeat()
+        let pipe = whisperKit
+        whisperKit = nil
+        isModelLoaded = false
+        activeModelVariant = nil
+        resetLoadingState()
+        if let pipe {
+            await pipe.unloadModels()
+        }
+        AppDiagnostics.info(
+            .transcriptionEngine,
+            "Model unload completed previousActive=\(previousActive) active=nil loaded=no"
+        )
     }
 
     func transcribe(audioURL: URL) async throws -> TranscriptionOutput {
@@ -236,7 +258,7 @@ final class TranscriptionEngine {
         let creationDate = (fileAttributes[.creationDate] as? Date)?.description ?? "unknown"
         AppDiagnostics.info(
             .transcriptionEngine,
-            "transcribe requested file=\(audioURL.lastPathComponent) path=\(audioURL.path) size=\(fileSize)B createdAt=\(creationDate) modelLoaded=\(AppDiagnostics.boolLabel(isModelLoaded)) configuredVariant=\(configuredModelVariant) loadingPhase=\(loadingPhase) loadingDetail=\(loadingDetail)"
+            "transcribe requested file=\(audioURL.lastPathComponent) path=\(audioURL.path) size=\(fileSize)B createdAt=\(creationDate) modelLoaded=\(AppDiagnostics.boolLabel(isModelLoaded)) selected=\(configuredModelVariant) active=\(activeModelVariant ?? "nil") loadingPhase=\(loadingPhase) loadingDetail=\(loadingDetail)"
         )
 
         let options = DecodingOptions(
@@ -324,31 +346,13 @@ final class TranscriptionEngine {
         return "\"\(text)\""
     }
 
-    private static func selectModel() -> ModelSelection {
-        let recommended = WhisperKit.recommendedModels()
-
-        if recommended.default == slowStartupDefaultVariant,
-           recommended.supported.contains(reliabilityFallbackVariant) {
-            return ModelSelection(
-                variant: reliabilityFallbackVariant,
-                whisperKitDefault: recommended.default,
-                reason: "reliability-override-slow-startup-default"
-            )
+    private static func modelPolicySummary(for choice: WhisperModelChoice) -> String {
+        switch choice {
+        case .smallEnglish:
+            return "Using \(choice.rawValue) because it is the DICTATR default selection."
+        case .largeV3_626MB:
+            return "Using \(choice.rawValue) because it was explicitly selected in Settings. First download is ~626 MB and first compile may take several minutes."
         }
-
-        return ModelSelection(
-            variant: recommended.default,
-            whisperKitDefault: recommended.default,
-            reason: "whisperkit-default"
-        )
-    }
-
-    private static func modelPolicySummary(for selection: ModelSelection) -> String {
-        if selection.reason == "whisperkit-default" {
-            return "Using WhisperKit's recommended model for this Mac."
-        }
-
-        return "Using \(selection.variant) for faster startup because WhisperKit's \(selection.whisperKitDefault) default was too slow for DICTATR on this Mac class."
     }
 
     private func handleDownloadProgress(_ progress: Progress, variant: String) {
