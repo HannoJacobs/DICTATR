@@ -11,6 +11,10 @@ enum CaptureDeviceSelection {
         candidates.first { $0.uniqueID == expectedInputUID }
     }
 
+    static func preference(from candidate: Candidate) -> InputDevicePreference {
+        InputDevicePreference(uid: candidate.uniqueID, name: candidate.localizedName)
+    }
+
     static func availableAudioCaptureDevices() -> [AVCaptureDevice] {
         AVCaptureDevice.DiscoverySession(
             deviceTypes: [.microphone],
@@ -20,14 +24,16 @@ enum CaptureDeviceSelection {
     }
 
     static func availableAudioCaptureCandidates() -> [Candidate] {
-        availableAudioCaptureDevices().map { device in
-            Candidate(uniqueID: device.uniqueID, localizedName: device.localizedName)
+        availableAudioCaptureDevices().map {
+            Candidate(uniqueID: $0.uniqueID, localizedName: $0.localizedName)
         }
     }
 
     static func availableSnapshot() -> String {
         let candidates = availableAudioCaptureCandidates()
         guard !candidates.isEmpty else { return "none" }
-        return candidates.map { "{uid=\($0.uniqueID) name=\($0.localizedName)}" }.joined(separator: " ")
+        return candidates
+            .map { "{uid=\($0.uniqueID) name=\($0.localizedName)}" }
+            .joined(separator: " ")
     }
 }

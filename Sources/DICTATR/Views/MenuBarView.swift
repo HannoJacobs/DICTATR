@@ -34,6 +34,14 @@ struct MenuBarView: View {
 
     private var mainPanel: some View {
         VStack(alignment: .leading, spacing: 12) {
+            headlineSection
+
+            Divider()
+
+            inputDeviceSection
+
+            Divider()
+
             statusSection
 
             Divider()
@@ -46,7 +54,10 @@ struct MenuBarView: View {
             actionsSection
         }
         .padding()
-        .frame(width: 320)
+        .frame(width: 340)
+        .onAppear {
+            appState.refreshInputDeviceInventory(source: "menuAppear")
+        }
     }
 
     // MARK: - Settings Panel
@@ -76,6 +87,146 @@ struct MenuBarView: View {
         .frame(width: 360)
     }
 
+    // MARK: - Headline
+
+    @ViewBuilder
+    private var headlineSection: some View {
+        VStack(spacing: 4) {
+            Text("DICTATR")
+                .font(.title2.weight(.semibold))
+                .frame(maxWidth: .infinity)
+
+            Text(statusTitle)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity)
+        }
+    }
+
+    // MARK: - Input Device
+
+    @ViewBuilder
+    private var inputDeviceSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "mic.fill")
+                    .foregroundStyle(appState.currentState == .recording ? .red : .primary)
+                    .symbolEffect(.pulse, isActive: appState.currentState == .recording)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Input Mic")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(resolvedMicLabel)
+                        .font(.headline)
+                        .lineLimit(2)
+                }
+
+                Spacer()
+
+                if appState.isModelLoading {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+            }
+
+            if let sourceLabel = resolvedSourceLabel {
+                Text(sourceLabel)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+
+            if !appState.availableInputDevices.isEmpty {
+                Menu {
+                    ForEach(appState.availableInputDevices, id: \.uniqueID) { candidate in
+                        Button {
+                            appState.pinAvailableInputDevice(candidate)
+                        } label: {
+                            if candidate.uniqueID == appState.resolvedInputDevice?.uniqueID {
+                                Label(candidate.localizedName, systemImage: "pin.fill")
+                            } else {
+                                Text(candidate.localizedName)
+                            }
+                        }
+                    }
+                } label: {
+                    Label("Pin Mic…", systemImage: "pin")
+                        .font(.caption)
+                }
+                .menuStyle(.borderlessButton)
+            }
+
+            if !appState.inputDevicePrecedence.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Precedence")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+
+                    ForEach(Array(appState.inputDevicePrecedence.enumerated()), id: \.element.uid) { index, preference in
+                        precedenceRow(index: index, preference: preference)
+                    }
+                }
+            }
+        }
+    }
+
+    private func precedenceRow(index: Int, preference: InputDevicePreference) -> some View {
+        let isOnline = availableUIDs.contains(preference.uid)
+        let isLast = index == appState.inputDevicePrecedence.count - 1
+
+        return HStack(spacing: 6) {
+            Text("\(index + 1).")
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .frame(width: 18, alignment: .trailing)
+
+            Text(preference.name)
+                .font(.caption)
+                .lineLimit(1)
+                .foregroundStyle(isOnline ? .primary : .secondary)
+
+            if !isOnline {
+                Text("offline")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+
+            Spacer(minLength: 4)
+
+            Button {
+                appState.pinInputDevice(preference)
+            } label: {
+                Image(systemName: index == 0 ? "pin.fill" : "pin")
+            }
+            .buttonStyle(.borderless)
+            .help("Pin as top precedence")
+
+            Button {
+                appState.moveInputDeviceUp(uid: preference.uid)
+            } label: {
+                Image(systemName: "chevron.up")
+            }
+            .buttonStyle(.borderless)
+            .disabled(index == 0)
+
+            Button {
+                appState.moveInputDeviceDown(uid: preference.uid)
+            } label: {
+                Image(systemName: "chevron.down")
+            }
+            .buttonStyle(.borderless)
+            .disabled(isLast)
+
+            Button {
+                appState.removeInputDevice(uid: preference.uid)
+            } label: {
+                Image(systemName: "xmark")
+            }
+            .buttonStyle(.borderless)
+            .help("Remove from precedence history")
+        }
+    }
+
     // MARK: - Status
 
     @ViewBuilder
@@ -87,9 +238,6 @@ struct MenuBarView: View {
                 .symbolEffect(.pulse, isActive: appState.currentState == .recording)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(statusTitle)
-                    .font(.headline)
-
                 if appState.currentState == .recording {
                     let duration = appState.audioRecorder.recordingDuration
                     let progress = min(duration / 300.0, 1.0)
@@ -117,11 +265,6 @@ struct MenuBarView: View {
             }
 
             Spacer()
-
-            if appState.isModelLoading {
-                ProgressView()
-                    .controlSize(.small)
-            }
         }
     }
 
@@ -252,12 +395,33 @@ struct MenuBarView: View {
     private var statusTitle: String {
         switch appState.currentState {
         case .idle:
-            return "DICTATR"
+            return "Ready"
         case .recording:
             return "Recording"
         case .transcribing:
             return "Transcribing..."
         }
+    }
+
+    private var resolvedMicLabel: String {
+        appState.resolvedInputDevice?.localizedName ?? "No microphone available"
+    }
+
+    private var resolvedSourceLabel: String? {
+        switch appState.resolvedInputSource {
+        case .preferenceMatch:
+            return "Using top available pinned mic"
+        case .systemDefault:
+            return "Fallback: macOS default input"
+        case .firstAvailable:
+            return "Fallback: first available mic"
+        case nil:
+            return nil
+        }
+    }
+
+    private var availableUIDs: Set<String> {
+        Set(appState.availableInputDevices.map(\.uniqueID))
     }
 
     private func formatRecordingTime(_ duration: TimeInterval) -> String {

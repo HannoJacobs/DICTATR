@@ -91,6 +91,10 @@ final class AudioRecorder {
 
     var onRecordingFailed: ((RecordingFailureEvent) -> Void)?
     var onRecordingStable: (() -> Void)?
+    /// AppState supplies the ordered preference list used to choose the capture mic.
+    var preferredInputDevicesProvider: (() -> [InputDevicePreference])?
+    /// Fired after a successful capture start so AppState can persist history/order UI.
+    var onCaptureInputSelected: ((InputDevicePreference, InputDevicePrecedence.ResolutionSource) -> Void)?
 
     private let _isCapturing = OSAllocatedUnfairLock(initialState: false)
     private let _framesWritten = OSAllocatedUnfairLock(initialState: Int64(0))
@@ -126,9 +130,21 @@ final class AudioRecorder {
             "recording_backend_selected",
             detail: "trigger=\(metadata.trigger) retryAttempt=\(metadata.retryAttempt) backend=\(Self.backendLabel) file=\(fileURL.lastPathComponent)"
         )
+        let preferences = preferredInputDevicesProvider?() ?? InputDevicePrecedence.read()
+        let availableCandidates = CaptureDeviceSelection.availableAudioCaptureCandidates()
+        guard let resolution = InputDevicePrecedence.resolve(
+            preferences: preferences,
+            available: availableCandidates,
+            systemDefaultUID: startRouteState.defaultInput.uid
+        ) else {
+            throw AudioRecorderError.captureDeviceSelectionFailed(
+                "No capture input devices available. availableCaptureDevices=\(CaptureDeviceSelection.availableSnapshot())"
+            )
+        }
+
         RecordingDiagnostics.shared.recordRecorderEvent(
             "capture_session_expected_input",
-            detail: "expectedInputUID=\(startRouteState.defaultInput.uid) expectedInputName=\(startRouteState.defaultInput.name) availableCaptureDevices=\(CaptureDeviceSelection.availableSnapshot())"
+            detail: "expectedInputUID=\(resolution.device.uniqueID) expectedInputName=\(resolution.device.localizedName) resolutionSource=\(resolution.source.rawValue) matchedPreferenceIndex=\(resolution.matchedPreferenceIndex.map(String.init) ?? "none") systemDefaultInputUID=\(startRouteState.defaultInput.uid) systemDefaultInputName=\(startRouteState.defaultInput.name) preferenceOrder=\(InputDevicePrecedence.snapshot(preferences)) availableCaptureDevices=\(CaptureDeviceSelection.availableSnapshot())"
         )
 
         guard let targetFormat = AVAudioFormat(
@@ -194,7 +210,7 @@ final class AudioRecorder {
         let startResult: CaptureSessionStartResult
         do {
             startResult = try await recorder.start(
-                expectedInputDeviceUID: startRouteState.defaultInput.uid,
+                expectedInputDeviceUID: resolution.device.uniqueID,
                 startupTimeoutMs: StartupTimeout.firstCaptureCallbackDeadlineMs
             )
             RecordingDiagnostics.shared.noteCaptureStarted()
@@ -215,14 +231,18 @@ final class AudioRecorder {
         selectedCaptureDeviceName = startResult.selectedDeviceName
         let startedRouteState = AudioDeviceDiagnostics.currentRouteState()
         updateRouteTracking(with: startedRouteState)
+        onCaptureInputSelected?(
+            InputDevicePreference(uid: startResult.selectedDeviceUID, name: startResult.selectedDeviceName),
+            resolution.source
+        )
 
         RecordingDiagnostics.shared.recordRecorderEvent(
             "capture_session_started",
-            detail: "selectedDeviceUID=\(selectedCaptureDeviceUID) selectedDeviceName=\(selectedCaptureDeviceName) firstSampleFormat={\(startResult.firstSampleFormat.description)} routeFingerprint=\(startedRouteState.fingerprint)"
+            detail: "selectedDeviceUID=\(selectedCaptureDeviceUID) selectedDeviceName=\(selectedCaptureDeviceName) resolutionSource=\(resolution.source.rawValue) firstSampleFormat={\(startResult.firstSampleFormat.description)} routeFingerprint=\(startedRouteState.fingerprint)"
         )
         AppDiagnostics.info(
             .audioRecorder,
-            "capture session started context={\(RecordingDiagnostics.shared.contextSnapshot(extra: ["backend": Self.backendLabel]))} file=\(fileURL.lastPathComponent) routeFingerprintAtStart=\(routeFingerprintAtStart) routeFingerprintAtCaptureStart=\(startedRouteState.fingerprint) routeChangedBeforeCaptureStart=\(AppDiagnostics.boolLabel(routeFingerprintAtStart != startedRouteState.fingerprint)) selectedDeviceUID=\(selectedCaptureDeviceUID) selectedDeviceName=\(selectedCaptureDeviceName) firstSampleFormat={\(startResult.firstSampleFormat.description)} activeInput={\(startedRouteState.defaultInput.snapshot)} activeOutput={\(startedRouteState.defaultOutput.snapshot)} route=\(startedRouteState.routeSnapshot)"
+            "capture session started context={\(RecordingDiagnostics.shared.contextSnapshot(extra: ["backend": Self.backendLabel]))} file=\(fileURL.lastPathComponent) routeFingerprintAtStart=\(routeFingerprintAtStart) routeFingerprintAtCaptureStart=\(startedRouteState.fingerprint) routeChangedBeforeCaptureStart=\(AppDiagnostics.boolLabel(routeFingerprintAtStart != startedRouteState.fingerprint)) selectedDeviceUID=\(selectedCaptureDeviceUID) selectedDeviceName=\(selectedCaptureDeviceName) resolutionSource=\(resolution.source.rawValue) differsFromSystemDefaultInput=\(AppDiagnostics.boolLabel(selectedCaptureDeviceUID != startedRouteState.defaultInput.uid)) firstSampleFormat={\(startResult.firstSampleFormat.description)} activeInput={\(startedRouteState.defaultInput.snapshot)} activeOutput={\(startedRouteState.defaultOutput.snapshot)} route=\(startedRouteState.routeSnapshot)"
         )
 
         attachRecordingTimers()
@@ -458,13 +478,6 @@ final class AudioRecorder {
         )
     }
 
-    private func handleCaptureInputDeviceChanged(routeState: AudioDeviceDiagnostics.RouteState) {
-        let detail = "selectedCaptureDeviceUID=\(selectedCaptureDeviceUID) currentDefaultInputUID=\(routeState.defaultInput.uid) currentDefaultInput={\(routeState.defaultInput.snapshot)}"
-        handleCaptureSessionFailure(
-            event: CaptureSessionFailureEvent(reason: .captureInputDeviceChanged, detail: detail)
-        )
-    }
-
     private func checkNoAudioWatchdog() {
         guard isRecording else { return }
         let frames = _framesWritten.withLock { $0 }
@@ -507,12 +520,9 @@ final class AudioRecorder {
     private func emitRecordingHeartbeat() {
         guard isRecording else { return }
 
+        // Preferred capture mic may differ from the macOS default input (split I/O).
+        // Do not fail on that mismatch; disconnects are handled by AVCapture observers.
         let routeState = AudioDeviceDiagnostics.currentRouteState()
-        if selectedCaptureDeviceUID != "unknown", routeState.defaultInput.uid != selectedCaptureDeviceUID {
-            handleCaptureInputDeviceChanged(routeState: routeState)
-            return
-        }
-
         let frames = _framesWritten.withLock { $0 }
         let dropped = _droppedFrames.withLock { $0 }
         let delta = frames - lastHeartbeatFramesWritten

@@ -59,6 +59,12 @@ shown separately so a failed load never pretends the new model is already live.
 After an install, update, or cache reset, the first CoreML/Apple Neural Engine compile can
 still take time, especially for Large V3, but the menu stays available during long compiles.
 
+DICTATR keeps an ordered **input mic precedence** list in the menu bar and Settings.
+Capture uses the highest-ranked preferred microphone that is currently connected, then
+falls back to the macOS default input, then to the first available capture device.
+Output/speaker routing stays with macOS — pin an external mic for input while AirPods
+remain system speakers.
+
 ---
 
 ## Distributing as a DMG

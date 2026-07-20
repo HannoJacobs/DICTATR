@@ -30,7 +30,7 @@ struct SettingsView: View {
                     Label("About", systemImage: "info.circle")
                 }
         }
-        .frame(width: 400, height: 300)
+        .frame(width: 400, height: 420)
     }
 }
 
@@ -134,9 +134,72 @@ struct GeneralSettingsView: View {
                     step: 10
                 )
             }
+
+            Section("Input Microphone") {
+                Text(appState.resolvedInputDevice?.localizedName ?? "No microphone available")
+                    .font(.body)
+
+                Text(inputResolutionCaption)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                if appState.inputDevicePrecedence.isEmpty {
+                    Text("No pinned mics yet. Use Pin Mic in the menu, or dictate once to start a history.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(Array(appState.inputDevicePrecedence.enumerated()), id: \.element.uid) { index, preference in
+                        precedenceRow(index: index, preference: preference)
+                    }
+                }
+
+                Button("Refresh Devices") {
+                    appState.refreshInputDeviceInventory(source: "settings")
+                }
+            }
         }
         .formStyle(.grouped)
         .padding()
+        .onAppear {
+            appState.refreshInputDeviceInventory(source: "settingsAppear")
+        }
+    }
+
+    private var inputResolutionCaption: String {
+        switch appState.resolvedInputSource {
+        case .preferenceMatch:
+            return "DICTATR will capture from the highest-precedence mic that is currently connected."
+        case .systemDefault:
+            return "No pinned mic is available, so DICTATR is falling back to the macOS default input."
+        case .firstAvailable:
+            return "No pinned or default mic matched, so DICTATR is using the first available capture device."
+        case nil:
+            return "Connect a microphone to begin."
+        }
+    }
+
+    private func precedenceRow(index: Int, preference: InputDevicePreference) -> some View {
+        let isLast = index == appState.inputDevicePrecedence.count - 1
+        return HStack {
+            Text("\(index + 1). \(preference.name)")
+                .lineLimit(1)
+            Spacer()
+            Button("Pin") {
+                appState.pinInputDevice(preference)
+            }
+            .disabled(index == 0)
+            Button("Up") {
+                appState.moveInputDeviceUp(uid: preference.uid)
+            }
+            .disabled(index == 0)
+            Button("Down") {
+                appState.moveInputDeviceDown(uid: preference.uid)
+            }
+            .disabled(isLast)
+            Button("Remove") {
+                appState.removeInputDevice(uid: preference.uid)
+            }
+        }
     }
 
     private var selectedModelBinding: Binding<WhisperModelChoice> {

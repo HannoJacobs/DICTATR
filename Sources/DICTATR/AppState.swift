@@ -140,6 +140,22 @@ final class AppState {
         }
     }
 
+    var inputDevicePrecedence: [InputDevicePreference] = InputDevicePrecedence.read() {
+        didSet {
+            InputDevicePrecedence.write(inputDevicePrecedence)
+            refreshResolvedInputDevice(source: "precedenceChanged")
+            logObservableChange(
+                name: "inputDevicePrecedence",
+                oldValue: InputDevicePrecedence.snapshot(oldValue),
+                newValue: InputDevicePrecedence.snapshot(inputDevicePrecedence)
+            )
+        }
+    }
+
+    private(set) var availableInputDevices: [CaptureDeviceSelection.Candidate] = []
+    private(set) var resolvedInputDevice: CaptureDeviceSelection.Candidate?
+    private(set) var resolvedInputSource: InputDevicePrecedence.ResolutionSource?
+
     var isModelSwitching = false {
         didSet {
             logObservableChange(
@@ -304,7 +320,7 @@ final class AppState {
 
         AppDiagnostics.info(
             .appState,
-            "AppState initialized \(AppDiagnostics.runtimeSummary) selectedModel=\(selectedModelChoice.rawValue) autoPasteEnabled=\(autoPasteEnabled) retentionCount=\(retentionCount) onboardingComplete=\(hasCompletedOnboarding) databaseAvailable=\(databaseManager != nil) snapshot={\(stateSnapshot())} devices=\(AudioDeviceDiagnostics.availableDevicesSnapshot())"
+            "AppState initialized \(AppDiagnostics.runtimeSummary) selectedModel=\(selectedModelChoice.rawValue) autoPasteEnabled=\(autoPasteEnabled) retentionCount=\(retentionCount) onboardingComplete=\(hasCompletedOnboarding) databaseAvailable=\(databaseManager != nil) inputDevicePrecedence=\(InputDevicePrecedence.snapshot(inputDevicePrecedence)) snapshot={\(stateSnapshot())} devices=\(AudioDeviceDiagnostics.availableDevicesSnapshot())"
         )
         AppDiagnostics.info(
             .audioDevices,
@@ -312,10 +328,19 @@ final class AppState {
         )
 
         refreshPermissionStates(source: "init")
+        refreshInputDeviceInventory(source: "init")
 
         // Wire up auto-stop callback from AudioRecorder (watchdog timeout, engine failure)
         audioRecorder.onRecordingFailed = { [weak self] event in
             self?.handleRecordingFailure(event: event)
+        }
+
+        audioRecorder.preferredInputDevicesProvider = { [weak self] in
+            self?.inputDevicePrecedence ?? InputDevicePrecedence.read()
+        }
+
+        audioRecorder.onCaptureInputSelected = { [weak self] preference, source in
+            self?.recordCaptureInputUsage(preference, source: source)
         }
 
         // Reset retry counter once recording is confirmed stable (5s watchdog passed).
@@ -339,6 +364,7 @@ final class AppState {
         ) { [weak self] _ in
             Task { @MainActor in
                 self?.refreshPermissionStates(source: "appDidBecomeActive")
+                self?.refreshInputDeviceInventory(source: "appDidBecomeActive")
             }
         }
 
@@ -372,6 +398,69 @@ final class AppState {
             "microphone permission refresh source=\(source) previous=\(previousStatus.rawValue) current=\(refreshedStatus.rawValue)"
         )
         microphonePermissionStatus = refreshedStatus
+    }
+
+    func refreshInputDeviceInventory(source: String = "unspecified") {
+        availableInputDevices = CaptureDeviceSelection.availableAudioCaptureCandidates()
+        refreshResolvedInputDevice(source: source)
+        AppDiagnostics.info(
+            .audioDevices,
+            "input device inventory refresh source=\(source) available=\(CaptureDeviceSelection.availableSnapshot()) precedence=\(InputDevicePrecedence.snapshot(inputDevicePrecedence)) resolved=\(resolvedInputDevice.map { "uid=\($0.uniqueID) name=\($0.localizedName)" } ?? "none") resolutionSource=\(resolvedInputSource?.rawValue ?? "none")"
+        )
+    }
+
+    func pinInputDevice(_ preference: InputDevicePreference) {
+        inputDevicePrecedence = InputDevicePrecedence.pin(preference, in: inputDevicePrecedence)
+        AppDiagnostics.info(
+            .appState,
+            "input device pinned uid=\(preference.uid) name=\(preference.name) precedence=\(InputDevicePrecedence.snapshot(inputDevicePrecedence))"
+        )
+    }
+
+    func pinAvailableInputDevice(_ candidate: CaptureDeviceSelection.Candidate) {
+        pinInputDevice(CaptureDeviceSelection.preference(from: candidate))
+    }
+
+    func moveInputDeviceUp(uid: String) {
+        inputDevicePrecedence = InputDevicePrecedence.moveUp(uid: uid, in: inputDevicePrecedence)
+    }
+
+    func moveInputDeviceDown(uid: String) {
+        inputDevicePrecedence = InputDevicePrecedence.moveDown(uid: uid, in: inputDevicePrecedence)
+    }
+
+    func removeInputDevice(uid: String) {
+        inputDevicePrecedence = InputDevicePrecedence.remove(uid: uid, from: inputDevicePrecedence)
+    }
+
+    private func refreshResolvedInputDevice(source: String) {
+        let resolution = InputDevicePrecedence.resolve(
+            preferences: inputDevicePrecedence,
+            available: availableInputDevices,
+            systemDefaultUID: AudioDeviceDiagnostics.currentRouteState().defaultInput.uid
+        )
+        resolvedInputDevice = resolution?.device
+        resolvedInputSource = resolution?.source
+        AppDiagnostics.debug(
+            .audioDevices,
+            "resolved input device source=\(source) uid=\(resolution?.device.uniqueID ?? "none") name=\(resolution?.device.localizedName ?? "none") resolutionSource=\(resolution?.source.rawValue ?? "none") matchedPreferenceIndex=\(resolution?.matchedPreferenceIndex.map(String.init) ?? "none")"
+        )
+    }
+
+    private func recordCaptureInputUsage(
+        _ preference: InputDevicePreference,
+        source: InputDevicePrecedence.ResolutionSource
+    ) {
+        let updated = InputDevicePrecedence.ensureRecorded(preference, in: inputDevicePrecedence)
+        if updated != inputDevicePrecedence {
+            inputDevicePrecedence = updated
+        } else {
+            refreshResolvedInputDevice(source: "captureSelected")
+        }
+        AppDiagnostics.info(
+            .appState,
+            "capture input recorded uid=\(preference.uid) name=\(preference.name) resolutionSource=\(source.rawValue) precedence=\(InputDevicePrecedence.snapshot(inputDevicePrecedence))"
+        )
     }
 
     func handleMicrophonePermissionAction(source: String) async {
