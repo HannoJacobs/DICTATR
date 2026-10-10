@@ -5,6 +5,20 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/release-common.sh"
 
+DMG_STAGING="$BUILD_DIR/dmg-staging"
+cleanup_dmg_staging() {
+    local status=$?
+    trap - EXIT
+    if ! rm -rf "$DMG_STAGING"; then
+        echo "Error: Could not remove DMG staging directory: $DMG_STAGING" >&2
+        if [ "$status" -eq 0 ]; then
+            status=1
+        fi
+    fi
+    exit "$status"
+}
+trap cleanup_dmg_staging EXIT
+
 assert_release_config
 require_command xcodebuild
 require_command codesign
@@ -83,7 +97,6 @@ codesign "${codesign_args[@]}" "$ARCHIVED_APP_PATH"
 
 verify_signed_app "$ARCHIVED_APP_PATH"
 
-DMG_STAGING="$BUILD_DIR/dmg-staging"
 rm -rf "$DMG_STAGING"
 mkdir -p "$DMG_STAGING"
 
