@@ -82,6 +82,11 @@ verifies the code identity, and only then packages `DICTATR.dmg`. It no longer w
 Mach-O binary into a synthetic app bundle. In this repo, ad-hoc signing is the default and
 supported release path.
 
+Release archives and the retained app are written to `build-release.noindex` so
+Spotlight does not offer intermediate app copies. DMG staging is removed when
+packaging exits, including on failure. `install-release.sh` installs the retained
+app from that same directory; `DICTATR.dmg` keeps its existing output location.
+
 ### Permissions after installing from DMG
 The Xcode-run app and the shipped `/Applications/DICTATR.app` are still different app
 instances, so the first installed release still needs permissions granted once:
