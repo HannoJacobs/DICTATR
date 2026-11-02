@@ -60,7 +60,8 @@ struct OnboardingView: View {
             .disabled(!microphoneGranted)
         }
         .padding(32)
-        .frame(width: 420, height: 480)
+        .frame(maxWidth: .infinity)
+        .frame(minHeight: 480)
         .onAppear {
             checkPermissions()
         }

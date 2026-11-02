@@ -6,7 +6,23 @@ Changelog policy:
 - The current release entry is required to be very verbose: the release pipeline now fails if the section for the bundled app version has fewer than 8 bullet points or fewer than 1200 characters.
 - Each new entry should explain the user-visible problem, the technical root cause, the code-path changes, the release/signing or operational changes when relevant, and the concrete verification outcome.
 
+## 2.4.1
+
+- Replace DICTATR's square-edged SwiftUI menu-extra window with the native transparent, borderless panel pattern used by SOURCR and LIMTR. Clip the hosting view to a 12-point rounded outline and keep its shadow, without drawing a rectangular window border around the content.
+- Bound the panel to the active display and make the main menu scroll. Give the inline Settings form a real available height so lower sections remain reachable by scrolling rather than being clipped. Keep one shared application state and the same live menu view when switching between menu and Settings.
+- Retain status-icon updates, onboarding, Escape and outside-click dismissal, and a separately managed History window. The native panel stays nonactivating so opening the dictation menu does not take application focus away from the user's paste destination.
+- Keep Documents free of DICTATR's Hugging Face downloads. The app now stores model weights and tokenizer files in `~/huggingface`, directly under the current user's home directory, instead of repeatedly creating `~/Documents/huggingface` at startup.
+- The old location came from the Hub library's default download base. Changing only DICTATR's cached-model lookup would leave future model and tokenizer downloads using that default, so this release explicitly configures all three paths together.
+- Introduce one `ModelStorage.downloadBase` definition based on Foundation's current-user home directory. Cached model discovery, `WhisperKit.download`, and `WhisperKitConfig` all use that location; the tokenizer folder is explicitly set to the same root.
+- At model startup, migrate existing downloads from Documents before checking the selected model. When the new root does not exist, move the existing cache as a directory so downloaded weights can be reused without downloading them again.
+- When both roots exist, recursively move only missing entries. Never overwrite a conflicting file or traverse a conflicting symbolic link. Preserve conflicting files in Documents and log a warning so the operator can reconcile them without data loss.
+- Remove legacy directories only once they are empty. Migration errors are logged with source and destination and surfaced through the existing model-load error flow; DICTATR does not silently fall back to downloading into Documents.
+- Add focused filesystem tests for moving an existing model cache, repeating migration safely, merging missing files into an existing destination, and preserving both copies of conflicting files. The complete local suite passed all 35 tests before release preparation.
+- Update both app bundle version fields to 2.4.1 and retain the established ad-hoc signed Release app and DMG packaging path. Installation and launch must be checked from `/Applications/DICTATR.app`; Accessibility and Microphone permission handoffs remain separate from build and packaging success.
+- On this Mac, the existing approximately 600 MB cache has moved to `/Users/hannojacobs/huggingface`, and the old Documents folder is absent. Installed-app diagnostics confirmed cache lookup at the new location with remote model discovery skipped; full model compilation and permission status are verified separately during release delivery.
+
 ## 2.4
+
 - Release builds previously retained an assembled DICTATR.app and a second DMG-staging copy in ordinary repository folders. Spotlight could discover those executable bundles alongside /Applications/DICTATR.app, making it possible to open stale development output after installing a newer release.
 - Move the shared release output directory from build-release to build-release.noindex. The archive and retained signed app stay available to the existing packaging and installation workflow while the directory explicitly excludes these intermediate products from Spotlight indexing.
 - Keep the output-directory definition in release-common.sh as the single source of truth. Both create-dmg.sh and install-release.sh source it, so archive construction, signature verification, and installation use the same app path without a second path-setting mechanism or an old-path fallback.

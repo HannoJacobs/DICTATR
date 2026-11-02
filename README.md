@@ -41,6 +41,11 @@ Everything is orchestrated by `AppState`, a central `@Observable @MainActor` cla
 
 ## Build & Run
 
+The menu-bar popup uses the same transparent, borderless native panel pattern as
+SOURCR and LIMTR, with rounded content and a shadow. Its height is bounded by the
+display; the main menu and inline Settings scroll within that space. Escape,
+clicking outside, or clicking the status icon dismisses the panel.
+
 **Must use Xcode** — `swift build` does not produce a `.app` bundle or embed `Info.plist`.
 
 1. Open `Package.swift` in Xcode (File → Open → select `Package.swift`)
@@ -58,6 +63,11 @@ then unloads the active model before loading the selected one. Selected and acti
 shown separately so a failed load never pretends the new model is already live.
 After an install, update, or cache reset, the first CoreML/Apple Neural Engine compile can
 still take time, especially for Large V3, but the menu stays available during long compiles.
+
+Model and tokenizer downloads live in `~/huggingface`. At model startup, DICTATR
+moves the old `~/Documents/huggingface` cache there, reusing existing downloads.
+If both locations contain the same file, neither copy is overwritten; conflicting
+files remain in Documents and a diagnostic warning records that fact.
 
 DICTATR keeps an ordered **input mic precedence** list in the menu bar and Settings.
 Capture uses the highest-ranked preferred microphone that is currently connected, then

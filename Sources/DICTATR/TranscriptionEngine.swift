@@ -94,6 +94,20 @@ final class TranscriptionEngine {
         activeModelVariant = nil
 
         do {
+            let downloadBase = ModelStorage.downloadBase
+            if let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
+                let legacyBase = documents.appendingPathComponent("huggingface", isDirectory: true)
+                do {
+                    try ModelStorage.migrate(from: legacyBase, to: downloadBase)
+                    if FileManager.default.fileExists(atPath: legacyBase.path) {
+                        AppDiagnostics.warning(.transcriptionEngine, "Legacy model storage retained conflicting files path=\(legacyBase.path)")
+                    }
+                } catch {
+                    AppDiagnostics.warning(.transcriptionEngine, "Model storage migration failed source=\(legacyBase.path) destination=\(downloadBase.path) error=\(error.localizedDescription)")
+                    throw error
+                }
+            }
+            AppDiagnostics.info(.transcriptionEngine, "Model storage base=\(downloadBase.path)")
             let recommended = WhisperKit.recommendedModels()
             AppDiagnostics.info(
                 .transcriptionEngine,
@@ -150,6 +164,7 @@ final class TranscriptionEngine {
                 )
                 modelFolder = try await WhisperKit.download(
                     variant: variant,
+                    downloadBase: downloadBase,
                     progressCallback: { [weak self] progress in
                         Task { @MainActor in
                             self?.handleDownloadProgress(progress, variant: variant)
@@ -187,7 +202,9 @@ final class TranscriptionEngine {
 
             let pipe = try await WhisperKit(
                 WhisperKitConfig(
+                    downloadBase: downloadBase,
                     modelFolder: modelFolder.path,
+                    tokenizerFolder: downloadBase,
                     verbose: true,
                     logLevel: .debug,
                     load: true,
@@ -577,12 +594,7 @@ final class TranscriptionEngine {
     }
 
     private static func cachedModelFolder(for variant: String) -> URL? {
-        guard let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
-            return nil
-        }
-
-        let modelFolder = documents
-            .appendingPathComponent("huggingface", isDirectory: true)
+        let modelFolder = ModelStorage.downloadBase
             .appendingPathComponent("models", isDirectory: true)
             .appendingPathComponent("argmaxinc", isDirectory: true)
             .appendingPathComponent("whisperkit-coreml", isDirectory: true)

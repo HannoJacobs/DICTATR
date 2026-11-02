@@ -3,30 +3,25 @@
 // The primary popup shown when the user clicks the DICTATR menu bar icon.
 // Handles two panels — the main menu and an inline settings panel — via local @State.
 //
-// BUTTON STYLE NOTES — why onTapGesture instead of Button:
-//   .borderless buttons: tiny hit target (just the label text/icon, not the full row)
-//   .plain buttons: can dismiss the MenuBarExtra window before the action fires
-//   Solution: HStack rows + .contentShape(Rectangle()) + .onTapGesture gives a
-//   reliable full-width hit target that fires correctly inside MenuBarExtra(.window).
+// HStack rows + .contentShape(Rectangle()) + .onTapGesture retain full-width hit targets.
 //
-// SETTINGS NAVIGATION — why @State is local, not @Binding from DICTATRApp:
-//   If showingSettings lived on DICTATRApp and changed which view the MenuBarExtra shows,
-//   SwiftUI would tear down and reconstruct the view hierarchy (potentially closing the
-//   window). Keeping it local means the same MenuBarView instance swaps between panels
-//   with no window teardown. See settings-bug.md for the full history.
+// Settings navigation stays local so the same menu view swaps panels without
+// rebuilding the native window or resetting the view's navigation state.
 
 import SwiftUI
 
 struct MenuBarView: View {
     @Environment(AppState.self) private var appState
-    @Environment(\.openWindow) private var openWindow
+    var onShowHistory: () -> Void
     @State private var showingSettings = false
 
     var body: some View {
         if showingSettings {
             settingsPanel
         } else {
-            mainPanel
+            ScrollView {
+                mainPanel
+            }
         }
     }
 
@@ -54,7 +49,7 @@ struct MenuBarView: View {
             actionsSection
         }
         .padding()
-        .frame(width: 340)
+        .frame(maxWidth: .infinity)
         .onAppear {
             appState.refreshInputDeviceInventory(source: "menuAppear")
         }
@@ -84,7 +79,7 @@ struct MenuBarView: View {
             GeneralSettingsView()
                 .environment(appState)
         }
-        .frame(width: 360)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     // MARK: - Headline
@@ -347,7 +342,7 @@ struct MenuBarView: View {
             .foregroundStyle(PasteManager.checkAccessibilityPermission() ? .green : .primary)
 
             menuRow("History...", icon: "clock") {
-                openWindow(id: "history")
+                onShowHistory()
             }
 
             Divider()
@@ -368,8 +363,7 @@ struct MenuBarView: View {
 
     // MARK: - Menu Row
 
-    /// Full-width tappable row. Uses onTapGesture instead of Button to avoid
-    /// MenuBarExtra window-dismissal issues inherent in SwiftUI button styles.
+    /// Full-width tappable row.
     private func menuRow(
         _ title: String,
         icon: String,
