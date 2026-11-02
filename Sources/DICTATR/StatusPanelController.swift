@@ -10,6 +10,9 @@ final class StatusPanelController: NSObject {
     private var panel: NSPanel?
     private var historyWindow: NSWindow?
     private var outsideClickMonitor: Any?
+    private var desiredHeight: CGFloat = 520
+    private var anchorFrame: NSRect?
+    private var anchorScreen: NSScreen?
 
     init(appState: AppState) {
         self.appState = appState
@@ -19,7 +22,7 @@ final class StatusPanelController: NSObject {
     func install() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.button?.target = self
-        item.button?.action = #selector(toggle)
+        item.button?.action = #selector(toggle(_:))
         item.button?.toolTip = "DICTATR"
         item.button?.setAccessibilityLabel("DICTATR")
         statusItem = item
@@ -35,22 +38,28 @@ final class StatusPanelController: NSObject {
         }
     }
 
-    @objc private func toggle() {
-        if panel?.isVisible == true { hide() } else { show() }
+    @objc private func toggle(_ sender: Any?) {
+        if panel?.isVisible == true { hide() } else { show(clickedLocation: NSEvent.mouseLocation) }
     }
 
-    func show() {
+    func show(clickedLocation: NSPoint? = nil) {
         guard let button = statusItem?.button, let buttonWindow = button.window else { return }
         if panel == nil { buildPanel() }
         guard let panel else { return }
 
         let buttonFrame = buttonWindow.convertToScreen(button.convert(button.bounds, to: nil))
-        let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) ?? buttonWindow.screen
-        let visible = screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? buttonFrame
-        let size = NSSize(width: min(380, visible.width - 16), height: min(560, visible.height - 16))
-        let anchorX = screen == buttonWindow.screen ? buttonFrame.maxX : NSEvent.mouseLocation.x + button.bounds.width / 2
-        let x = max(visible.minX + 8, min(anchorX - size.width, visible.maxX - size.width - 8))
-        panel.setFrame(NSRect(x: x, y: visible.maxY - size.height - 8, width: size.width, height: size.height), display: true)
+        anchorFrame = buttonFrame
+        anchorScreen = buttonWindow.screen
+        // Status-item windows can report their old display after a menu-bar click
+        // on a second screen. Only an actual status-item click may override it.
+        if let clickedLocation, !buttonFrame.insetBy(dx: -4, dy: -4).contains(clickedLocation),
+           let screen = NSScreen.screens.first(where: { $0.frame.contains(clickedLocation) }) {
+            anchorScreen = screen
+            anchorFrame = NSRect(x: clickedLocation.x - button.bounds.width / 2,
+                                 y: screen.frame.maxY - NSStatusBar.system.thickness,
+                                 width: button.bounds.width, height: NSStatusBar.system.thickness)
+        }
+        positionPanel()
         panel.makeKeyAndOrderFront(nil)
         if outsideClickMonitor == nil {
             outsideClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
@@ -58,6 +67,23 @@ final class StatusPanelController: NSObject {
             }
         }
         AppDiagnostics.info(.lifecycle, "Status panel shown borderless=\(panel.styleMask.contains(.titled) ? "no" : "yes") opaque=\(panel.isOpaque) cornerRadius=\(panel.contentView?.layer?.cornerRadius ?? 0) frame=\(panel.frame)")
+    }
+
+    private func positionPanel() {
+        guard let panel, let anchorFrame else { return }
+        let visible = anchorScreen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? anchorFrame
+        let size = NSSize(width: min(360, visible.width - 16), height: min(desiredHeight, visible.height - 16))
+        let x = max(visible.minX + 8, min(anchorFrame.midX - size.width / 2, visible.maxX - size.width - 8))
+        let y = max(visible.minY + 8, min(anchorFrame.minY, visible.maxY) - size.height - 6)
+        panel.setFrame(NSRect(x: x, y: y, width: size.width, height: size.height), display: true)
+        AppDiagnostics.info(.lifecycle, "Status panel positioned anchor=\(anchorFrame) frame=\(panel.frame) desiredHeight=\(desiredHeight)")
+    }
+
+    private func resize(to height: CGFloat) {
+        guard height > 0, abs(desiredHeight - height) > 1 else { return }
+        desiredHeight = height
+        // Geometry preferences arrive during SwiftUI layout; resize next turn.
+        DispatchQueue.main.async { [weak self] in self?.positionPanel() }
     }
 
     private func hide() {
@@ -69,14 +95,16 @@ final class StatusPanelController: NSObject {
     }
 
     private func buildPanel() {
-        let root = StatusPanelView(appState: appState, onShowHistory: { [weak self] in self?.showHistory() })
+        let root = StatusPanelView(appState: appState,
+                                   onShowHistory: { [weak self] in self?.showHistory() },
+                                   onHeightChange: { [weak self] in self?.resize(to: $0) })
         let hosting = NSHostingView(rootView: root)
         hosting.wantsLayer = true
         hosting.layer?.cornerRadius = 12
         hosting.layer?.masksToBounds = true
 
         let panel = DictationStatusPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 380, height: 560),
+            contentRect: NSRect(x: 0, y: 0, width: 360, height: 520),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -118,13 +146,15 @@ private final class DictationStatusPanel: NSPanel {
 private struct StatusPanelView: View {
     let appState: AppState
     let onShowHistory: () -> Void
+    let onHeightChange: (CGFloat) -> Void
 
     var body: some View {
         Group {
             if appState.shouldShowOnboarding {
                 ScrollView { OnboardingView() }
+                    .onAppear { onHeightChange(520) }
             } else {
-                MenuBarView(onShowHistory: onShowHistory)
+                MenuBarView(onShowHistory: onShowHistory, onHeightChange: onHeightChange)
             }
         }
         .environment(appState)

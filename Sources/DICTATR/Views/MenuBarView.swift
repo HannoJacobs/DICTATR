@@ -10,9 +10,17 @@
 
 import SwiftUI
 
+private struct MenuContentHeight: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
 struct MenuBarView: View {
     @Environment(AppState.self) private var appState
     var onShowHistory: () -> Void
+    var onHeightChange: (CGFloat) -> Void
     @State private var showingSettings = false
 
     var body: some View {
@@ -50,6 +58,14 @@ struct MenuBarView: View {
         }
         .padding()
         .frame(maxWidth: .infinity)
+        .background {
+            GeometryReader { geometry in
+                Color.clear.preference(key: MenuContentHeight.self, value: geometry.size.height)
+            }
+        }
+        .onPreferenceChange(MenuContentHeight.self) { height in
+            onHeightChange(height)
+        }
         .onAppear {
             appState.refreshInputDeviceInventory(source: "menuAppear")
         }
@@ -80,6 +96,7 @@ struct MenuBarView: View {
                 .environment(appState)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onAppear { onHeightChange(560) }
     }
 
     // MARK: - Headline

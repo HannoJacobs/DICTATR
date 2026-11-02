@@ -9,6 +9,7 @@ Changelog policy:
 ## 2.4.1
 
 - Replace DICTATR's square-edged SwiftUI menu-extra window with the native transparent, borderless panel pattern used by SOURCR and LIMTR. Clip the hosting view to a 12-point rounded outline and keep its shadow, without drawing a rectangular window border around the content.
+- Center the popup beneath the actual DICTATR status-item button, keeping it inside the display edges. Fit the main panel to its content instead of leaving a fixed-height blank area, and preserve the icon anchor as the panel grows for Settings. A second-display fallback uses the actual status-item click location, never the pointer position from an unrelated application reopen.
 - Bound the panel to the active display and make the main menu scroll. Give the inline Settings form a real available height so lower sections remain reachable by scrolling rather than being clipped. Keep one shared application state and the same live menu view when switching between menu and Settings.
 - Retain status-icon updates, onboarding, Escape and outside-click dismissal, and a separately managed History window. The native panel stays nonactivating so opening the dictation menu does not take application focus away from the user's paste destination.
 - Keep Documents free of DICTATR's Hugging Face downloads. The app now stores model weights and tokenizer files in `~/huggingface`, directly under the current user's home directory, instead of repeatedly creating `~/Documents/huggingface` at startup.
