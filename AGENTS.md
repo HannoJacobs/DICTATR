@@ -1,5 +1,9 @@
 # DICTATR Repo Rules
 
+## GitHub Actions
+
+We no longer use GitHub Actions on Hanno's personal projects. Do not add workflows or use Actions for new work, and run tests locally, reporting what you actually ran. The existing `release.yml` still runs on pushes to `main` because public repos are free on standard runners; leave it as it is unless Hanno retires it. Never use paid or larger runners, and never make this repo private with Actions enabled.
+
 ## Full Send
 
 In this repo, a "full send" means full send. The work is not done at code changes, not done at a local build, and not done at "the release should pick it up."
