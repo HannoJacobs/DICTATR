@@ -1,8 +1,10 @@
 # DICTATR Repo Rules
 
-## GitHub Actions
+## Local checks, no GitHub Actions
 
-We no longer use GitHub Actions on Hanno's personal projects. Do not add workflows or use Actions for new work, and run tests locally, reporting what you actually ran. The existing `release.yml` still runs on pushes to `main` because public repos are free on standard runners; leave it as it is unless Hanno retires it. Never use paid or larger runners, and never make this repo private with Actions enabled.
+We don't use GitHub Actions on Hanno's personal projects. There are no workflows here and nothing runs when you push. Do not add a workflow or use Actions.
+
+Before you push to `main` or release, run `./scripts/check.sh` on the Mac. It runs `swift test` and builds an unsigned DMG in a throwaway copy of your working tree, so it can't touch the repo's DMG or the installed app. Fix any failure before pushing, and report what you ran. It doesn't release anything, so the full send steps below still apply.
 
 ## Full Send
 
